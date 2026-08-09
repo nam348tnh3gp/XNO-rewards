@@ -9,7 +9,8 @@ let state = {
     page: 'login',
     level: 1,
     xp: 0,
-    streak: 0
+    streak: 0,
+    notifications: []
 };
 
 // ============ AD STATE ============
@@ -222,7 +223,7 @@ function updateAdStatus() {
     }
 }
 
-function resetAdState() {
+function resetAdState(keepVisible = false) {
     if (adWatchInterval) { clearInterval(adWatchInterval); adWatchInterval = null; }
     if (adObserver) { adObserver.disconnect(); adObserver = null; }
     isAdWatching = false;
@@ -231,7 +232,12 @@ function resetAdState() {
     isAdCompletedCalled = false;
     currentAdSessionId = null;
     const banner = document.getElementById('aadsBanner');
-    if (banner) banner.classList.remove('expanded');
+    if (banner) {
+        banner.classList.remove('expanded');
+        if (!keepVisible) {
+            banner.style.display = 'none';
+        }
+    }
     updateAdStatus();
     const btn = document.getElementById('watchBtn');
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-play"></i> Watch Ad (+10 pts)'; }
@@ -520,6 +526,16 @@ function renderDashboard() {
                     </div>
                 </div>
 
+                <!-- Daily Bonus -->
+                <div style="margin-bottom:16px;display:flex;gap:12px;flex-wrap:wrap;">
+                    <button onclick="claimDailyBonus()" id="dailyBonusBtn" class="btn-action" style="background:var(--gradient-warning);padding:12px 24px;width:auto;border-radius:var(--radius-md);font-weight:700;">
+                        🎁 Daily Bonus
+                    </button>
+                    <button onclick="showLeaderboard()" id="leaderboardBtn" class="btn-action" style="background:var(--gradient-primary);padding:12px 24px;width:auto;border-radius:var(--radius-md);font-weight:700;">
+                        🏆 Leaderboard
+                    </button>
+                </div>
+
                 <!-- Referral -->
                 <div class="referral-section">
                     <div class="referral-header">
@@ -568,10 +584,8 @@ function renderDashboard() {
 
 // ============ EVENTS ============
 function attachEvents() {
-    // Theme icon
     loadTheme();
 
-    // Send OTP
     document.getElementById('sendOtpBtn')?.addEventListener('click', async () => {
         const email = document.getElementById('email').value;
         const statusEl = document.getElementById('otpStatus');
@@ -610,7 +624,6 @@ function attachEvents() {
         }
     });
 
-    // Login
     document.getElementById('loginForm')?.addEventListener('submit', async (e) => {
         e.preventDefault();
         const token = getCaptchaResponse();
@@ -644,7 +657,6 @@ function attachEvents() {
         }
     });
 
-    // Register
     document.getElementById('registerForm')?.addEventListener('submit', async (e) => {
         e.preventDefault();
         const token = getCaptchaResponse();
@@ -679,9 +691,8 @@ function attachEvents() {
         }
     });
 
-    // Close Ad Banner
     document.getElementById('aadsBannerClose')?.addEventListener('click', () => {
-        resetAdState();
+        resetAdState(false);
         const banner = document.getElementById('aadsBanner');
         if (banner) banner.style.display = 'none';
         updateRedeemButton();
@@ -713,7 +724,6 @@ function copyReferral() {
         navigator.clipboard?.writeText(`${window.location.origin}/?ref=${code}`).then(() => {
             showNotification('✅ Referral link copied!', 'success');
         }).catch(() => {
-            // Fallback
             const input = document.createElement('input');
             input.value = `${window.location.origin}/?ref=${code}`;
             document.body.appendChild(input);
@@ -722,6 +732,57 @@ function copyReferral() {
             document.body.removeChild(input);
             showNotification('✅ Referral link copied!', 'success');
         });
+    }
+}
+
+// ============ DAILY BONUS ============
+async function claimDailyBonus() {
+    try {
+        const btn = document.getElementById('dailyBonusBtn');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span>';
+        const res = await api.post('/daily-bonus', {});
+        if (res.error) throw new Error(res.error);
+        state.points = res.newTotal;
+        state.streak = res.streak;
+        await fetchPoints();
+        showNotification(res.message, 'success');
+        updateStats();
+        updateRedeemButton();
+    } catch (error) {
+        showNotification('❌ ' + (error.message || 'Failed to claim daily bonus'), 'error');
+    } finally {
+        const btn = document.getElementById('dailyBonusBtn');
+        btn.disabled = false;
+        btn.innerHTML = '🎁 Daily Bonus';
+    }
+}
+
+// ============ LEADERBOARD ============
+async function showLeaderboard() {
+    try {
+        const res = await api.get('/leaderboard?limit=10');
+        if (res.error) throw new Error(res.error);
+        let html = '<div style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:9999;background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius-xl);padding:32px;max-width:400px;width:90%;max-height:80vh;overflow-y:auto;box-shadow:var(--shadow);">';
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;"><h2 style="font-size:24px;font-weight:700;">🏆 Leaderboard</h2><button onclick="this.parentElement.parentElement.remove()" style="background:none;border:none;color:var(--text-tertiary);font-size:24px;cursor:pointer;">✕</button></div>';
+        html += '<div style="display:flex;flex-direction:column;gap:8px;">';
+        res.leaderboard.forEach((user, i) => {
+            const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `#${i+1}`;
+            html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-input);border-radius:var(--radius-md);">
+                <span style="font-weight:600;">${medal} ${user.username}</span>
+                <span style="font-weight:700;color:var(--primary);">${user.points} pts</span>
+            </div>`;
+        });
+        html += '</div></div>';
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,0.5);backdrop-filter:blur(4px);';
+        overlay.onclick = () => { overlay.remove(); };
+        document.body.appendChild(overlay);
+        const temp = document.createElement('div');
+        temp.innerHTML = html;
+        document.body.appendChild(temp.firstElementChild);
+    } catch (error) {
+        showNotification('❌ Failed to load leaderboard', 'error');
     }
 }
 
@@ -742,7 +803,12 @@ async function watchAd() {
         currentAdSessionId = startRes.sessionId;
         localStorage.setItem('adSessionId', currentAdSessionId);
         const banner = document.getElementById('aadsBanner');
-        if (banner) { banner.style.display = 'block'; banner.classList.add('expanded'); }
+        if (banner) {
+            if (banner.style.display === 'none') {
+                banner.style.display = 'block';
+            }
+            banner.classList.add('expanded');
+        }
         isAdWatching = true;
         isAdVisible = false;
         isAdCompletedCalled = false;
@@ -759,11 +825,11 @@ async function watchAd() {
     }
 }
 
-// ====== ON AD COMPLETED ======
+// ====== ON AD COMPLETED (Fix: reload ad after completion) ======
 async function onAdCompleted() {
     try {
         const sessionId = currentAdSessionId || localStorage.getItem('adSessionId');
-        if (!sessionId) { showNotification('❌ No session found', 'error'); resetAdState(); return; }
+        if (!sessionId) { showNotification('❌ No session found', 'error'); resetAdState(false); return; }
         const verifyRes = await api.post('/ad/verify', {
             sessionId: sessionId,
             watchDuration: 15000,
@@ -776,11 +842,27 @@ async function onAdCompleted() {
         showNotification('✅ +10 points earned!', 'success');
         updateStats();
         updateRedeemButton();
-        resetAdState();
+        // Reset ad state but KEEP banner visible and reload iframe
+        resetAdState(true);
+        // Reload iframe để tải ad mới
+        const iframe = document.getElementById('aadsIframe');
+        if (iframe) {
+            iframe.src = iframe.src;
+        }
+        // Reset progress and status
+        const status = document.getElementById('aadsStatus');
+        if (status) {
+            status.textContent = '⏳ Click "Watch Ad" to start';
+            status.style.color = '';
+        }
+        const progress = document.getElementById('aadsProgress');
+        if (progress) {
+            progress.style.width = '0%';
+        }
     } catch (error) {
         console.error('❌ Ad verify error:', error);
         showNotification('❌ ' + error.message, 'error');
-        resetAdState();
+        resetAdState(false);
     }
 }
 
@@ -849,14 +931,12 @@ function updateStats() {
         progressEl.style.width = progress + '%';
     }
     if (progressText) progressText.textContent = `${state.stats.dailyUsed}/${state.stats.dailyLimit}`;
-    // Update hero stats
     const heroPoints = document.querySelector('.hero-stats .stat-item:first-child .value');
     if (heroPoints) heroPoints.textContent = state.points;
     const heroXno = document.querySelector('.hero-stats .stat-item:nth-child(2) .value');
     if (heroXno) heroXno.textContent = (state.stats.totalEarned / 50 * 0.1).toFixed(4);
     const heroAds = document.querySelector('.hero-stats .stat-item:nth-child(3) .value');
     if (heroAds) heroAds.textContent = state.stats.totalWatched;
-    // Update level
     const { level, xp, nextLevelXp } = calculateLevel(state.points);
     const levelBadge = document.querySelector('.level-badge');
     if (levelBadge) levelBadge.textContent = `🏆 Level ${level}`;
@@ -905,6 +985,8 @@ async function init() {
             if (!data.error) {
                 state.user = data.user;
                 await fetchPoints();
+                const streakRes = await api.get('/streak');
+                if (!streakRes.error) state.streak = streakRes.streak || 0;
             }
         } catch (error) {
             localStorage.removeItem('accessToken');
@@ -926,6 +1008,8 @@ window.forgotPassword = forgotPassword;
 window.updateRedeemButton = updateRedeemButton;
 window.toggleTheme = toggleTheme;
 window.copyReferral = copyReferral;
+window.claimDailyBonus = claimDailyBonus;
+window.showLeaderboard = showLeaderboard;
 
 document.addEventListener('DOMContentLoaded', init);
 console.log('🚀 XNO Rewards App Loaded');

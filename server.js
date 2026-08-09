@@ -61,6 +61,7 @@ try {
         points INTEGER DEFAULT 0,
         role TEXT DEFAULT 'user',
         is_verified INTEGER DEFAULT 0,
+        referred_by INTEGER REFERENCES users(id),
         verification_token TEXT,
         refresh_token TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -127,6 +128,23 @@ try {
         user_agent TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        type TEXT DEFAULT 'info',
+        is_read INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS notification_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        token TEXT UNIQUE NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE TRIGGER IF NOT EXISTS update_users_updated_at
       AFTER UPDATE ON users
       BEGIN
@@ -159,30 +177,34 @@ try {
     console.log('ℹ️ expires_at column already exists');
 }
 
+// ============ FIX: Thêm cột referred_by nếu chưa có ============
+try {
+    db.exec('ALTER TABLE users ADD COLUMN referred_by INTEGER REFERENCES users(id)');
+    console.log('✅ Added referred_by column to users');
+} catch (e) {
+    console.log('ℹ️ referred_by column already exists');
+}
+
 // Tạo index an toàn
 const createIndex = (sql) => {
     try {
         db.exec(sql);
-    } catch (e) {
-        // Index already exists, ignore
-    }
+    } catch (e) {}
 };
-try {
-    createIndex('CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)');
-    createIndex('CREATE INDEX IF NOT EXISTS idx_users_verified ON users(is_verified)');
-    createIndex('CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)');
-    createIndex('CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)');
-    createIndex('CREATE INDEX IF NOT EXISTS idx_points_user ON point_transactions(user_id)');
-    createIndex('CREATE INDEX IF NOT EXISTS idx_xno_user ON xno_transactions(user_id)');
-    createIndex('CREATE INDEX IF NOT EXISTS idx_blacklist_token ON token_blacklist(token)');
-    createIndex('CREATE INDEX IF NOT EXISTS idx_email_verifications_email ON email_verifications(email)');
-    createIndex('CREATE INDEX IF NOT EXISTS idx_ad_watch_user ON ad_watch_history(user_id)');
-    createIndex('CREATE INDEX IF NOT EXISTS idx_ad_watch_session ON ad_watch_history(session_id)');
-    createIndex('CREATE INDEX IF NOT EXISTS idx_ad_watch_status ON ad_watch_history(status)');
-    console.log('✅ Database indexes created');
-} catch (error) {
-    console.error('⚠️ Some indexes may already exist:', error.message);
-}
+createIndex('CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)');
+createIndex('CREATE INDEX IF NOT EXISTS idx_users_verified ON users(is_verified)');
+createIndex('CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)');
+createIndex('CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)');
+createIndex('CREATE INDEX IF NOT EXISTS idx_points_user ON point_transactions(user_id)');
+createIndex('CREATE INDEX IF NOT EXISTS idx_xno_user ON xno_transactions(user_id)');
+createIndex('CREATE INDEX IF NOT EXISTS idx_blacklist_token ON token_blacklist(token)');
+createIndex('CREATE INDEX IF NOT EXISTS idx_email_verifications_email ON email_verifications(email)');
+createIndex('CREATE INDEX IF NOT EXISTS idx_ad_watch_user ON ad_watch_history(user_id)');
+createIndex('CREATE INDEX IF NOT EXISTS idx_ad_watch_session ON ad_watch_history(session_id)');
+createIndex('CREATE INDEX IF NOT EXISTS idx_ad_watch_status ON ad_watch_history(status)');
+createIndex('CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id)');
+createIndex('CREATE INDEX IF NOT EXISTS idx_tokens_user ON notification_tokens(user_id)');
+console.log('✅ Database indexes created');
 
 // ============ HELPERS ============
 const hashPassword = (password) => {
@@ -286,7 +308,7 @@ const sendEmail = async (to, subject, html) => {
         await transporter.verify();
 
         const info = await transporter.sendMail({
-            from: process.env.EMAIL_FROM || 'noreply@duco-rewards.com',
+            from: process.env.EMAIL_FROM || 'noreply@xno-rewards.com',
             to,
             subject,
             html
@@ -400,7 +422,8 @@ const auth = (req, res, next) => {
         }
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const user = db.prepare('SELECT id, username, email, role, points, is_verified, wallet_address FROM users WHERE id = ?').get(decoded.userId);
+        // Thêm referred_by vào SELECT
+        const user = db.prepare('SELECT id, username, email, role, points, is_verified, wallet_address, referred_by FROM users WHERE id = ?').get(decoded.userId);
 
         if (!user) {
             return res.status(401).json({ error: 'User not found' });
@@ -454,9 +477,9 @@ app.post('/api/auth/send-otp', async (req, res) => {
 
         if (process.env.SMTP_HOST) {
             const emailResult = await sendEmail(email, 'Your Verification Code',
-                `<h1>Duco Rewards</h1>
+                `<h1>XNO Rewards</h1>
                  <p>Your verification code is:</p>
-                 <h2 style="font-size: 32px; color: #22c55e; letter-spacing: 4px; padding: 12px; background: #f0fdf4; border-radius: 8px;">${code}</h2>
+                 <h2 style="font-size: 32px; color: #0A84FF; letter-spacing: 4px; padding: 12px; background: #f0f7ff; border-radius: 8px;">${code}</h2>
                  <p>This code will expire in 5 minutes.</p>
                  <p>If you didn't request this, please ignore this email.</p>`
             );
@@ -530,6 +553,11 @@ app.post('/api/auth/register', async (req, res) => {
 
         db.prepare('DELETE FROM email_verifications WHERE email = ?').run(email);
 
+        db.prepare(`
+            INSERT INTO notifications (user_id, title, message, type)
+            VALUES (?, 'Welcome to XNO Rewards! 🎉', 'Start earning points by watching ads. 50 points = 0.1 XNO!', 'success')
+        `).run(info.lastInsertRowid);
+
         res.status(201).json({
             message: 'Registration successful! You can now login.',
             userId: info.lastInsertRowid
@@ -591,6 +619,8 @@ app.post('/api/auth/login', async (req, res) => {
             console.error('❌ Session error:', error.message);
             return res.status(500).json({ error: 'Session creation failed' });
         }
+
+        db.prepare('UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(user.id);
 
         res.json({
             accessToken: token,
@@ -909,6 +939,11 @@ app.post('/api/redeem', auth, async (req, res) => {
         db.prepare('UPDATE xno_transactions SET tx_hash = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
             .run(txHash, 'completed', info.lastInsertRowid);
 
+        db.prepare(`
+            INSERT INTO notifications (user_id, title, message, type)
+            VALUES (?, 'Redeem Successful! 🎉', 'You redeemed ${pointsToRedeem} points for ${xnoAmount} XNO', 'success')
+        `).run(req.user.id);
+
         res.json({
             success: true,
             pointsUsed: pointsToRedeem,
@@ -924,6 +959,328 @@ app.post('/api/redeem', auth, async (req, res) => {
             userId: req.user.id
         });
         res.status(500).json({ error: 'Redeem failed' });
+    }
+});
+
+// -------- USER PROFILE --------
+app.get('/api/user/profile', auth, (req, res) => {
+    try {
+        const user = db.prepare(`
+            SELECT id, username, email, wallet_address, points, role, is_verified, created_at
+            FROM users WHERE id = ?
+        `).get(req.user.id);
+        
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        res.json({ user });
+    } catch (error) {
+        console.error('❌ Profile error:', error.message);
+        res.status(500).json({ error: 'Failed to get profile' });
+    }
+});
+
+app.put('/api/user/profile', auth, (req, res) => {
+    try {
+        const { username, walletAddress } = req.body;
+        const updates = [];
+        const params = [];
+        
+        if (username) {
+            const existing = db.prepare('SELECT id FROM users WHERE username = ? AND id != ?').get(username, req.user.id);
+            if (existing) {
+                return res.status(400).json({ error: 'Username already taken' });
+            }
+            updates.push('username = ?');
+            params.push(username);
+        }
+        
+        if (walletAddress) {
+            updates.push('wallet_address = ?');
+            params.push(walletAddress);
+        }
+        
+        if (updates.length === 0) {
+            return res.status(400).json({ error: 'No fields to update' });
+        }
+        
+        params.push(req.user.id);
+        db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+        
+        const user = db.prepare('SELECT id, username, email, wallet_address, points, role, is_verified FROM users WHERE id = ?').get(req.user.id);
+        res.json({ success: true, user });
+    } catch (error) {
+        console.error('❌ Update profile error:', error.message);
+        res.status(500).json({ error: 'Failed to update profile' });
+    }
+});
+
+// -------- TRANSACTIONS --------
+app.get('/api/transactions', auth, (req, res) => {
+    try {
+        const limit = parseInt(req.query.limit) || 50;
+        const offset = parseInt(req.query.offset) || 0;
+        
+        const pointTx = db.prepare(`
+            SELECT amount, type, source, created_at 
+            FROM point_transactions 
+            WHERE user_id = ? 
+            ORDER BY created_at DESC 
+            LIMIT ? OFFSET ?
+        `).all(req.user.id, limit, offset);
+        
+        const xnoTx = db.prepare(`
+            SELECT points_used, amount_xno, wallet_address, status, created_at 
+            FROM xno_transactions 
+            WHERE user_id = ? 
+            ORDER BY created_at DESC 
+            LIMIT ? OFFSET ?
+        `).all(req.user.id, limit, offset);
+        
+        const totalPoints = db.prepare('SELECT COUNT(*) as count FROM point_transactions WHERE user_id = ?').get(req.user.id);
+        const totalXno = db.prepare('SELECT COUNT(*) as count FROM xno_transactions WHERE user_id = ?').get(req.user.id);
+        
+        res.json({
+            points: pointTx,
+            xno: xnoTx,
+            totals: {
+                points: totalPoints.count || 0,
+                xno: totalXno.count || 0
+            }
+        });
+    } catch (error) {
+        console.error('❌ Transactions error:', error.message);
+        res.status(500).json({ error: 'Failed to get transactions' });
+    }
+});
+
+// -------- REFERRAL --------
+app.get('/api/referral/stats', auth, (req, res) => {
+    try {
+        const count = db.prepare(`
+            SELECT COUNT(*) as count FROM users WHERE referred_by = ?
+        `).get(req.user.id);
+        
+        const bonus = db.prepare(`
+            SELECT SUM(amount) as total FROM point_transactions 
+            WHERE user_id = ? AND type = 'referral_bonus'
+        `).get(req.user.id);
+        
+        const referralCode = `${req.user.username}-${req.user.id.toString().padStart(4, '0')}`;
+        
+        res.json({
+            referralCode,
+            totalReferrals: count.count || 0,
+            bonusPoints: bonus.total || 0
+        });
+    } catch (error) {
+        console.error('❌ Referral stats error:', error.message);
+        res.status(500).json({ error: 'Failed to get referral stats' });
+    }
+});
+
+app.post('/api/referral/claim', auth, (req, res) => {
+    try {
+        const { referralCode } = req.body;
+        if (!referralCode) {
+            return res.status(400).json({ error: 'Referral code required' });
+        }
+        
+        const referred = db.prepare('SELECT id, points FROM users WHERE username = ?').get(referralCode.split('-')[0]);
+        if (!referred) {
+            return res.status(404).json({ error: 'Invalid referral code' });
+        }
+        
+        if (referred.id === req.user.id) {
+            return res.status(400).json({ error: 'Cannot refer yourself' });
+        }
+        
+        const existing = db.prepare(`
+            SELECT * FROM point_transactions 
+            WHERE user_id = ? AND type = 'referral_bonus' AND source = ?
+        `).get(req.user.id, referralCode);
+        
+        if (existing) {
+            return res.status(400).json({ error: 'Already claimed this referral' });
+        }
+        
+        db.prepare('UPDATE users SET points = points + 5 WHERE id = ?').run(req.user.id);
+        db.prepare(`
+            INSERT INTO point_transactions (user_id, amount, type, source)
+            VALUES (?, 5, 'referral_bonus', ?)
+        `).run(req.user.id, referralCode);
+        
+        const user = db.prepare('SELECT referred_by FROM users WHERE id = ?').get(referred.id);
+        if (!user.referred_by) {
+            db.prepare('UPDATE users SET referred_by = ? WHERE id = ?').run(req.user.id, referred.id);
+        }
+        
+        const newPoints = db.prepare('SELECT points FROM users WHERE id = ?').get(req.user.id);
+        res.json({
+            success: true,
+            bonus: 5,
+            newTotal: newPoints.points,
+            message: '🎉 Referral bonus claimed! +5 points'
+        });
+    } catch (error) {
+        console.error('❌ Claim referral error:', error.message);
+        res.status(500).json({ error: 'Failed to claim referral' });
+    }
+});
+
+// -------- LEADERBOARD --------
+app.get('/api/leaderboard', (req, res) => {
+    try {
+        const limit = parseInt(req.query.limit) || 10;
+        const topUsers = db.prepare(`
+            SELECT username, points, 
+                   (SELECT COUNT(*) FROM users u2 WHERE u2.points > u1.points) + 1 as rank
+            FROM users u1
+            WHERE points > 0
+            ORDER BY points DESC
+            LIMIT ?
+        `).all(limit);
+        
+        res.json({ leaderboard: topUsers });
+    } catch (error) {
+        console.error('❌ Leaderboard error:', error.message);
+        res.status(500).json({ error: 'Failed to get leaderboard' });
+    }
+});
+
+// -------- DAILY BONUS --------
+app.post('/api/daily-bonus', auth, (req, res) => {
+    try {
+        const today = db.prepare(`
+            SELECT * FROM point_transactions 
+            WHERE user_id = ? AND type = 'daily_bonus' AND date(created_at) = date('now')
+        `).get(req.user.id);
+        
+        if (today) {
+            return res.status(400).json({ error: 'Daily bonus already claimed' });
+        }
+        
+        const yesterday = db.prepare(`
+            SELECT * FROM point_transactions 
+            WHERE user_id = ? AND type = 'daily_bonus' AND date(created_at) = date('now', '-1 day')
+        `).get(req.user.id);
+        
+        let bonus = 5;
+        let streak = 0;
+        
+        if (yesterday) {
+            const streakData = db.prepare(`
+                SELECT COUNT(*) as streak FROM point_transactions 
+                WHERE user_id = ? AND type = 'daily_bonus' 
+                AND date(created_at) >= date('now', '-30 day')
+            `).get(req.user.id);
+            streak = (streakData.streak || 0) + 1;
+            bonus = Math.min(5 + streak * 2, 50);
+        }
+        
+        db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(bonus, req.user.id);
+        db.prepare(`
+            INSERT INTO point_transactions (user_id, amount, type, source)
+            VALUES (?, ?, 'daily_bonus', ?)
+        `).run(req.user.id, bonus, `day_${streak}`);
+        
+        const user = db.prepare('SELECT points FROM users WHERE id = ?').get(req.user.id);
+        res.json({
+            success: true,
+            bonus: bonus,
+            streak: streak,
+            newTotal: user.points,
+            message: `🎁 Daily bonus: +${bonus} points (${streak} day streak!)`
+        });
+    } catch (error) {
+        console.error('❌ Daily bonus error:', error.message);
+        res.status(500).json({ error: 'Failed to claim daily bonus' });
+    }
+});
+
+app.get('/api/streak', auth, (req, res) => {
+    try {
+        const streakData = db.prepare(`
+            SELECT COUNT(*) as streak FROM point_transactions 
+            WHERE user_id = ? AND type = 'daily_bonus' 
+            AND date(created_at) >= date('now', '-30 day')
+        `).get(req.user.id);
+        
+        const today = db.prepare(`
+            SELECT * FROM point_transactions 
+            WHERE user_id = ? AND type = 'daily_bonus' AND date(created_at) = date('now')
+        `).get(req.user.id);
+        
+        res.json({
+            streak: streakData.streak || 0,
+            claimedToday: !!today
+        });
+    } catch (error) {
+        console.error('❌ Streak error:', error.message);
+        res.status(500).json({ error: 'Failed to get streak' });
+    }
+});
+
+// -------- NOTIFICATIONS --------
+app.get('/api/notifications', auth, (req, res) => {
+    try {
+        const limit = parseInt(req.query.limit) || 20;
+        const notifications = db.prepare(`
+            SELECT * FROM notifications 
+            WHERE user_id = ? 
+            ORDER BY created_at DESC 
+            LIMIT ?
+        `).all(req.user.id, limit);
+        
+        db.prepare('UPDATE notifications SET is_read = 1 WHERE user_id = ? AND is_read = 0').run(req.user.id);
+        
+        res.json({ notifications });
+    } catch (error) {
+        console.error('❌ Notifications error:', error.message);
+        res.status(500).json({ error: 'Failed to get notifications' });
+    }
+});
+
+app.post('/api/notification-token', auth, (req, res) => {
+    try {
+        const { token } = req.body;
+        if (!token) {
+            return res.status(400).json({ error: 'Token required' });
+        }
+        
+        db.prepare(`
+            INSERT OR REPLACE INTO notification_tokens (user_id, token, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+        `).run(req.user.id, token);
+        
+        res.json({ success: true });
+    } catch (error) {
+        console.error('❌ Notification token error:', error.message);
+        res.status(500).json({ error: 'Failed to save notification token' });
+    }
+});
+
+// -------- CHECK AVAILABILITY --------
+app.get('/api/check-username/:username', (req, res) => {
+    try {
+        const { username } = req.params;
+        const user = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
+        res.json({ available: !user });
+    } catch (error) {
+        console.error('❌ Check username error:', error.message);
+        res.status(500).json({ error: 'Failed to check username' });
+    }
+});
+
+app.get('/api/check-email/:email', (req, res) => {
+    try {
+        const { email } = req.params;
+        const user = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+        res.json({ available: !user });
+    } catch (error) {
+        console.error('❌ Check email error:', error.message);
+        res.status(500).json({ error: 'Failed to check email' });
     }
 });
 
@@ -1199,7 +1556,7 @@ app.use((err, req, res, next) => {
 
 // ============ START SERVER ============
 const server = app.listen(PORT, () => {
-    console.log(`\n🚀 Server running on http://localhost:${PORT}`);
+    console.log(`\n🚀 XNO Rewards Server running on http://localhost:${PORT}`);
     console.log(`📊 API: http://localhost:${PORT}/api/health`);
     console.log(`🌐 Frontend: http://localhost:${PORT}`);
     console.log(`📁 Database: ${process.env.DB_PATH || './database.db'}`);
