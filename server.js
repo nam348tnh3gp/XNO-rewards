@@ -145,6 +145,14 @@ try {
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS password_resets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        token TEXT UNIQUE NOT NULL,
+        expires_at DATETIME NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE TRIGGER IF NOT EXISTS update_users_updated_at
       AFTER UPDATE ON users
       BEGIN
@@ -204,6 +212,7 @@ createIndex('CREATE INDEX IF NOT EXISTS idx_ad_watch_session ON ad_watch_history
 createIndex('CREATE INDEX IF NOT EXISTS idx_ad_watch_status ON ad_watch_history(status)');
 createIndex('CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id)');
 createIndex('CREATE INDEX IF NOT EXISTS idx_tokens_user ON notification_tokens(user_id)');
+createIndex('CREATE INDEX IF NOT EXISTS idx_password_resets_token ON password_resets(token)');
 console.log('✅ Database indexes created');
 
 // ============ HELPERS ============
@@ -380,7 +389,6 @@ const verifyHCaptcha = async (token) => {
 };
 
 // ============ MIDDLEWARE ============
-// Bật trust proxy để lấy IP thật khi qua tunnel/proxy
 app.set('trust proxy', true);
 
 app.use(helmet({
@@ -691,6 +699,78 @@ app.get('/api/auth/me', auth, (req, res) => {
     res.json({ user: req.user });
 });
 
+// ============ FORGOT / RESET PASSWORD ============
+app.post('/api/auth/forgot-password', async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) return res.status(400).json({ error: 'Email required' });
+
+        const user = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+        if (!user) {
+            return res.status(404).json({ error: 'Email not found' });
+        }
+
+        // Xóa token cũ
+        db.prepare('DELETE FROM password_resets WHERE user_id = ?').run(user.id);
+
+        const token = crypto.randomBytes(32).toString('hex');
+        const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+        db.prepare('INSERT INTO password_resets (user_id, token, expires_at) VALUES (?, ?, ?)')
+            .run(user.id, token, expiresAt);
+
+        const resetLink = `${req.protocol}://${req.get('host')}/reset-password/${token}`;
+
+        if (process.env.SMTP_HOST) {
+            await sendEmail(email, 'Reset Your Password',
+                `<h1>Password Reset</h1>
+                 <p>Click the link below to reset your password (expires in 15 minutes):</p>
+                 <p><a href="${resetLink}">${resetLink}</a></p>
+                 <p>If you didn't request this, please ignore this email.</p>`
+            );
+        } else {
+            console.log(`🔑 Reset link: ${resetLink}`);
+            return res.json({
+                message: 'Reset link generated (dev mode)',
+                devLink: resetLink
+            });
+        }
+
+        res.json({ message: 'Password reset link sent to your email' });
+    } catch (error) {
+        console.error('❌ Forgot password error:', error);
+        res.status(500).json({ error: 'Failed to process request' });
+    }
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+    try {
+        const { token, newPassword } = req.body;
+        if (!token) return res.status(400).json({ error: 'Token required' });
+        if (!newPassword || newPassword.length < 8) {
+            return res.status(400).json({ error: 'Password must be at least 8 characters' });
+        }
+
+        const now = new Date().toISOString();
+        const reset = db.prepare(`
+            SELECT user_id FROM password_resets
+            WHERE token = ? AND expires_at > ?
+        `).get(token, now);
+
+        if (!reset) {
+            return res.status(400).json({ error: 'Invalid or expired token' });
+        }
+
+        const hashed = hashPassword(newPassword);
+        db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashed, reset.user_id);
+        db.prepare('DELETE FROM password_resets WHERE token = ?').run(token);
+
+        res.json({ message: 'Password reset successfully' });
+    } catch (error) {
+        console.error('❌ Reset password error:', error);
+        res.status(500).json({ error: 'Failed to reset password' });
+    }
+});
+
 // -------- POINTS --------
 app.get('/api/points', auth, (req, res) => {
     try {
@@ -732,7 +812,6 @@ app.post('/api/ad/start', auth, (req, res) => {
 
         const sessionId = crypto.randomBytes(16).toString('hex');
         const userAgent = req.headers['user-agent'] || 'unknown';
-        // Lấy IP thật khi có proxy (trust proxy đã bật)
         const ipAddress = req.ip || req.connection.remoteAddress || 'unknown';
         const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
 
@@ -811,9 +890,7 @@ app.post('/api/ad/verify', auth, (req, res) => {
             return res.status(400).json({ error: 'Watch duration too long' });
         }
 
-        // ====== BỎ KIỂM TRA IP MISMATCH (fix tunnel) ======
-        // Không so sánh IP nữa để tránh lỗi khi qua proxy/tunnel
-        // Chỉ giữ lại các kiểm tra khác
+        // Bỏ kiểm tra IP để hỗ trợ tunnel
 
         let today;
         try {
@@ -1356,6 +1433,212 @@ app.get('/api/health', (req, res) => {
         timestamp: new Date().toISOString(),
         uptime: process.uptime()
     });
+});
+
+// ============ SERVE RESET PASSWORD PAGE ============
+app.get('/reset-password/:token', (req, res) => {
+    const { token } = req.params;
+    // Gửi HTML form reset password (nhúng trực tiếp để đơn giản)
+    res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Reset Password - XNO Rewards</title>
+            <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+            <style>
+                * { margin:0; padding:0; box-sizing:border-box; }
+                body {
+                    font-family: 'Inter', sans-serif;
+                    background: #0A0A0F;
+                    color: #F5F5FF;
+                    min-height: 100vh;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 20px;
+                }
+                .container {
+                    background: #1A1A2E;
+                    padding: 48px 40px;
+                    border-radius: 28px;
+                    max-width: 440px;
+                    width: 100%;
+                    border: 1px solid rgba(255,255,255,0.08);
+                    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+                }
+                h1 {
+                    font-size: 28px;
+                    font-weight: 800;
+                    background: linear-gradient(135deg, #0A84FF, #7C3AED);
+                    -webkit-background-clip: text;
+                    background-clip: text;
+                    color: transparent;
+                    text-align: center;
+                    margin-bottom: 8px;
+                }
+                p.sub {
+                    color: #A0A0B8;
+                    text-align: center;
+                    font-size: 14px;
+                    margin-bottom: 24px;
+                }
+                .form-group {
+                    margin-bottom: 16px;
+                }
+                label {
+                    display: block;
+                    font-size: 13px;
+                    font-weight: 600;
+                    color: #A0A0B8;
+                    margin-bottom: 6px;
+                }
+                input {
+                    width: 100%;
+                    padding: 12px 16px;
+                    border: 2px solid rgba(255,255,255,0.08);
+                    border-radius: 12px;
+                    font-size: 15px;
+                    background: #1E1E32;
+                    color: #F5F5FF;
+                    font-family: 'Inter', sans-serif;
+                }
+                input:focus {
+                    outline: none;
+                    border-color: #0A84FF;
+                    box-shadow: 0 0 0 4px rgba(10,132,255,0.1);
+                }
+                .btn {
+                    width: 100%;
+                    padding: 14px;
+                    background: linear-gradient(135deg, #0A84FF, #7C3AED);
+                    color: #fff;
+                    border: none;
+                    border-radius: 12px;
+                    font-size: 16px;
+                    font-weight: 700;
+                    cursor: pointer;
+                    transition: all 0.3s;
+                    font-family: 'Inter', sans-serif;
+                }
+                .btn:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(10,132,255,0.3); }
+                .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+                .error {
+                    background: rgba(255,55,95,0.1);
+                    border: 1px solid rgba(255,55,95,0.2);
+                    color: #FF375F;
+                    padding: 12px 16px;
+                    border-radius: 12px;
+                    font-size: 14px;
+                    margin-bottom: 16px;
+                    display: none;
+                }
+                .success {
+                    background: rgba(50,215,75,0.1);
+                    border: 1px solid rgba(50,215,75,0.2);
+                    color: #32D74B;
+                    padding: 12px 16px;
+                    border-radius: 12px;
+                    font-size: 14px;
+                    margin-bottom: 16px;
+                    display: none;
+                }
+                .back-link {
+                    text-align: center;
+                    margin-top: 16px;
+                    font-size: 14px;
+                    color: #A0A0B8;
+                }
+                .back-link a { color: #0A84FF; text-decoration: none; font-weight: 600; }
+                .back-link a:hover { text-decoration: underline; }
+                .spinner {
+                    display: inline-block;
+                    width: 20px;
+                    height: 20px;
+                    border: 2.5px solid rgba(255,255,255,0.2);
+                    border-radius: 50%;
+                    border-top-color: #fff;
+                    animation: spin 0.7s linear infinite;
+                    vertical-align: middle;
+                }
+                @keyframes spin { to { transform: rotate(360deg); } }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>XNO Rewards</h1>
+                <p class="sub">Enter your new password</p>
+                <div id="error" class="error"></div>
+                <div id="success" class="success"></div>
+                <form id="resetForm">
+                    <input type="hidden" id="token" value="${token}">
+                    <div class="form-group">
+                        <label>New Password</label>
+                        <input type="password" id="newPassword" placeholder="Min 8 characters" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Confirm Password</label>
+                        <input type="password" id="confirmPassword" placeholder="Confirm password" required>
+                    </div>
+                    <button type="submit" class="btn" id="resetBtn">Reset Password</button>
+                </form>
+                <div class="back-link">
+                    <a href="/">← Back to login</a>
+                </div>
+            </div>
+            <script>
+                const form = document.getElementById('resetForm');
+                const errorEl = document.getElementById('error');
+                const successEl = document.getElementById('success');
+                const btn = document.getElementById('resetBtn');
+
+                form.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const token = document.getElementById('token').value;
+                    const newPassword = document.getElementById('newPassword').value;
+                    const confirm = document.getElementById('confirmPassword').value;
+
+                    errorEl.style.display = 'none';
+                    successEl.style.display = 'none';
+
+                    if (newPassword.length < 8) {
+                        errorEl.textContent = 'Password must be at least 8 characters.';
+                        errorEl.style.display = 'block';
+                        return;
+                    }
+                    if (newPassword !== confirm) {
+                        errorEl.textContent = 'Passwords do not match.';
+                        errorEl.style.display = 'block';
+                        return;
+                    }
+
+                    btn.disabled = true;
+                    btn.innerHTML = '<span class="spinner"></span>';
+
+                    try {
+                        const res = await fetch('/api/auth/reset-password', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ token, newPassword })
+                        });
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.error || 'Failed to reset password');
+                        successEl.textContent = data.message || 'Password reset successfully! You can now login.';
+                        successEl.style.display = 'block';
+                        form.reset();
+                    } catch (err) {
+                        errorEl.textContent = err.message || 'Something went wrong.';
+                        errorEl.style.display = 'block';
+                    } finally {
+                        btn.disabled = false;
+                        btn.textContent = 'Reset Password';
+                    }
+                });
+            </script>
+        </body>
+        </html>
+    `);
 });
 
 // ============ ADMIN DASHBOARD ============

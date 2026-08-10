@@ -22,6 +22,9 @@ let isAdVisible = false;
 let currentAdSessionId = null;
 let isAdCompletedCalled = false;
 
+// ============ RESET PASSWORD TOKEN ============
+let resetToken = null;
+
 // ============ DOM REFS ============
 let app = null;
 
@@ -280,6 +283,12 @@ function showNotification(message, type = 'success') {
 // ============ RENDER FUNCTIONS ============
 function render() {
     app = document.getElementById('app');
+    // Nếu có resetToken, hiển thị form reset password
+    if (resetToken) {
+        app.innerHTML = renderResetPassword();
+        attachResetEvents();
+        return;
+    }
     if (!state.user) {
         app.innerHTML = state.page === 'login' ? renderLogin() : renderRegister();
         setTimeout(() => renderCaptcha('captcha-container'), 100);
@@ -291,7 +300,97 @@ function render() {
     updateRedeemButton();
 }
 
-// ============ LOGIN PAGE ============
+// ============ RESET PASSWORD PAGE ============
+function renderResetPassword() {
+    return `
+        <div class="auth-container">
+            <div class="auth-card">
+                <div class="auth-logo">
+                    <svg class="logo-icon" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <rect width="200" height="200" rx="40" fill="url(#grad)" />
+                        <text x="100" y="140" font-family="Inter, sans-serif" font-size="100" font-weight="800" fill="white" text-anchor="middle">Ӿ</text>
+                        <defs>
+                            <linearGradient id="grad" x1="0" y1="0" x2="200" y2="200">
+                                <stop offset="0%" stop-color="#0A84FF" />
+                                <stop offset="100%" stop-color="#7C3AED" />
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                    <h1>Reset Password</h1>
+                    <p>Enter your new password</p>
+                </div>
+                <div id="error" class="auth-error"></div>
+                <form id="resetForm" class="auth-form">
+                    <input type="hidden" id="resetToken" value="${resetToken}">
+                    <div class="form-group">
+                        <label>New Password</label>
+                        <input type="password" id="newPassword" placeholder="Min 8 characters" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Confirm Password</label>
+                        <input type="password" id="confirmPassword" placeholder="Confirm password" required>
+                    </div>
+                    <button type="submit" class="btn-primary" id="resetBtn">
+                        <i class="fas fa-key"></i> Reset Password
+                    </button>
+                </form>
+                <div class="auth-footer">
+                    <a href="#" onclick="resetToken = null; state.page = 'login'; render();">← Back to login</a>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function attachResetEvents() {
+    document.getElementById('resetForm')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const token = document.getElementById('resetToken').value;
+        const newPassword = document.getElementById('newPassword').value;
+        const confirm = document.getElementById('confirmPassword').value;
+        const errorEl = document.getElementById('error');
+        const btn = document.getElementById('resetBtn');
+
+        errorEl.textContent = '';
+        errorEl.className = 'auth-error';
+
+        if (newPassword.length < 8) {
+            errorEl.textContent = 'Password must be at least 8 characters.';
+            errorEl.className = 'auth-error show';
+            return;
+        }
+        if (newPassword !== confirm) {
+            errorEl.textContent = 'Passwords do not match.';
+            errorEl.className = 'auth-error show';
+            return;
+        }
+
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span>';
+
+        try {
+            const res = await fetch(`${API_URL}/auth/reset-password`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token, newPassword })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Failed to reset password');
+            showNotification('✅ Password reset successfully! Please login.', 'success');
+            resetToken = null;
+            state.page = 'login';
+            render();
+        } catch (err) {
+            errorEl.textContent = err.message || 'Something went wrong.';
+            errorEl.className = 'auth-error show';
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-key"></i> Reset Password';
+        }
+    });
+}
+
+// ============ LOGIN PAGE (có banner A-Ads mini) ============
 function renderLogin() {
     return `
         <div class="auth-container">
@@ -328,6 +427,14 @@ function renderLogin() {
                 <div class="auth-footer">
                     Don't have an account? <a href="#" onclick="state.page='register'; render();">Create one</a>
                     <br><small><a href="#" onclick="forgotPassword()">Forgot password?</a></small>
+                </div>
+
+                <!-- A-ADS Banner mini (hiển thị ở dưới cùng trang login) -->
+                <div class="aads-banner" id="aadsBannerLogin" style="margin-top:24px; position:static; width:100%; max-width:440px; margin-left:auto; margin-right:auto; padding:8px 12px;">
+                    <div class="aads-banner-header">
+                        <span style="font-size:0.6rem;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.06em;">Sponsored</span>
+                    </div>
+                    <iframe class="aads-iframe" data-aa="2451472" src="https://acceptable.a-ads.com/2451472/?size=Adaptive" id="aadsIframeLogin"></iframe>
                 </div>
             </div>
         </div>
@@ -567,7 +674,7 @@ function renderDashboard() {
             </div>
         </div>
 
-        <!-- A-ADS Banner (sử dụng HTTPS) -->
+        <!-- A-ADS Banner (full, cho chức năng watch ad) -->
         <div class="aads-banner" id="aadsBanner">
             <div class="aads-banner-header">
                 <span style="font-size:0.6rem;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.06em;">Sponsored</span>
@@ -842,7 +949,6 @@ async function onAdCompleted() {
         showNotification('✅ +10 points earned!', 'success');
         updateStats();
         updateRedeemButton();
-        // Reset ad state nhưng giữ banner và tải lại iframe
         resetAdState(true);
         const iframe = document.getElementById('aadsIframe');
         if (iframe) {
@@ -976,6 +1082,16 @@ function showError(msg) {
 // ============ BOOT ============
 async function init() {
     loadTheme();
+    // Kiểm tra đường dẫn reset password
+    const path = window.location.pathname;
+    const match = path.match(/^\/reset-password\/([a-f0-9]{64})$/);
+    if (match) {
+        resetToken = match[1];
+        window.history.replaceState({}, document.title, '/');
+        render();
+        return;
+    }
+
     const token = localStorage.getItem('accessToken');
     if (token) {
         try {
