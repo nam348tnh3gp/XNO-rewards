@@ -567,13 +567,13 @@ function renderDashboard() {
             </div>
         </div>
 
-        <!-- A-ADS Banner -->
+        <!-- A-ADS Banner (sử dụng HTTPS) -->
         <div class="aads-banner" id="aadsBanner">
             <div class="aads-banner-header">
                 <span style="font-size:0.6rem;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.06em;">Sponsored</span>
                 <button class="aads-banner-close" id="aadsBannerClose">✕</button>
             </div>
-            <iframe class="aads-iframe" data-aa="2451472" src="//acceptable.a-ads.com/2451472/?size=Adaptive" id="aadsIframe"></iframe>
+            <iframe class="aads-iframe" data-aa="2451472" src="https://acceptable.a-ads.com/2451472/?size=Adaptive" id="aadsIframe"></iframe>
             <div class="aads-progress-bar">
                 <div class="aads-progress-fill" id="aadsProgress"></div>
             </div>
@@ -825,7 +825,7 @@ async function watchAd() {
     }
 }
 
-// ====== ON AD COMPLETED (Fix: reload ad after completion) ======
+// ====== ON AD COMPLETED ======
 async function onAdCompleted() {
     try {
         const sessionId = currentAdSessionId || localStorage.getItem('adSessionId');
@@ -842,14 +842,12 @@ async function onAdCompleted() {
         showNotification('✅ +10 points earned!', 'success');
         updateStats();
         updateRedeemButton();
-        // Reset ad state but KEEP banner visible and reload iframe
+        // Reset ad state nhưng giữ banner và tải lại iframe
         resetAdState(true);
-        // Reload iframe để tải ad mới
         const iframe = document.getElementById('aadsIframe');
         if (iframe) {
             iframe.src = iframe.src;
         }
-        // Reset progress and status
         const status = document.getElementById('aadsStatus');
         if (status) {
             status.textContent = '⏳ Click "Watch Ad" to start';

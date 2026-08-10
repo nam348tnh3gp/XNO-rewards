@@ -380,7 +380,8 @@ const verifyHCaptcha = async (token) => {
 };
 
 // ============ MIDDLEWARE ============
-app.set('trust proxy', false);
+// Bật trust proxy để lấy IP thật khi qua tunnel/proxy
+app.set('trust proxy', true);
 
 app.use(helmet({
     contentSecurityPolicy: false
@@ -422,7 +423,6 @@ const auth = (req, res, next) => {
         }
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        // Thêm referred_by vào SELECT
         const user = db.prepare('SELECT id, username, email, role, points, is_verified, wallet_address, referred_by FROM users WHERE id = ?').get(decoded.userId);
 
         if (!user) {
@@ -732,6 +732,7 @@ app.post('/api/ad/start', auth, (req, res) => {
 
         const sessionId = crypto.randomBytes(16).toString('hex');
         const userAgent = req.headers['user-agent'] || 'unknown';
+        // Lấy IP thật khi có proxy (trust proxy đã bật)
         const ipAddress = req.ip || req.connection.remoteAddress || 'unknown';
         const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
 
@@ -810,15 +811,9 @@ app.post('/api/ad/verify', auth, (req, res) => {
             return res.status(400).json({ error: 'Watch duration too long' });
         }
 
-        const currentIp = req.ip || req.connection.remoteAddress || 'unknown';
-        if (session.ip_address !== currentIp && session.ip_address !== 'unknown' && currentIp !== 'unknown') {
-            db.prepare(`
-                UPDATE ad_watch_history
-                SET status = 'suspicious', completed_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            `).run(session.id);
-            return res.status(400).json({ error: 'IP mismatch detected' });
-        }
+        // ====== BỎ KIỂM TRA IP MISMATCH (fix tunnel) ======
+        // Không so sánh IP nữa để tránh lỗi khi qua proxy/tunnel
+        // Chỉ giữ lại các kiểm tra khác
 
         let today;
         try {
