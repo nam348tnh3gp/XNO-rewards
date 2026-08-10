@@ -461,6 +461,13 @@ const admin = (req, res, next) => {
 
 // ============ API ROUTES ============
 
+// -------- CONFIG (public) --------
+app.get('/api/config', (req, res) => {
+    res.json({
+        hcaptchaSiteKey: process.env.HCAPTCHA_SITE_KEY || '5aa632cc-e278-444e-90aa-59aa63e00a36'
+    });
+});
+
 // -------- AUTH --------
 app.post('/api/auth/send-otp', async (req, res) => {
     try {
@@ -1438,7 +1445,6 @@ app.get('/api/health', (req, res) => {
 // ============ SERVE RESET PASSWORD PAGE ============
 app.get('/reset-password/:token', (req, res) => {
     const { token } = req.params;
-    // Gửi HTML form reset password (nhúng trực tiếp để đơn giản)
     res.send(`
         <!DOCTYPE html>
         <html>

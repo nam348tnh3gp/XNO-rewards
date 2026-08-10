@@ -25,6 +25,9 @@ let isAdCompletedCalled = false;
 // ============ RESET PASSWORD TOKEN ============
 let resetToken = null;
 
+// ============ HCAPTCHA SITE KEY ============
+let HCAPTCHA_SITE_KEY = '5aa632cc-e278-444e-90aa-59aa63e00a36'; // fallback
+
 // ============ DOM REFS ============
 let app = null;
 
@@ -108,7 +111,7 @@ function renderCaptcha(containerId) {
     container.innerHTML = '';
     const captchaDiv = document.createElement('div');
     captchaDiv.className = 'h-captcha';
-    captchaDiv.setAttribute('data-sitekey', '5aa632cc-e278-444e-90aa-59aa63e00a36');
+    captchaDiv.setAttribute('data-sitekey', HCAPTCHA_SITE_KEY);
     container.appendChild(captchaDiv);
     if (typeof hcaptcha !== 'undefined') {
         captchaWidgetId = hcaptcha.render(captchaDiv);
@@ -1082,6 +1085,18 @@ function showError(msg) {
 // ============ BOOT ============
 async function init() {
     loadTheme();
+
+    // Lấy cấu hình từ server (hCaptcha site key)
+    try {
+        const configRes = await fetch(`${API_URL}/config`);
+        const config = await configRes.json();
+        if (config.hcaptchaSiteKey) {
+            HCAPTCHA_SITE_KEY = config.hcaptchaSiteKey;
+        }
+    } catch (error) {
+        console.warn('Failed to load config, using fallback hCaptcha key:', error);
+    }
+
     // Kiểm tra đường dẫn reset password
     const path = window.location.pathname;
     const match = path.match(/^\/reset-password\/([a-f0-9]{64})$/);
