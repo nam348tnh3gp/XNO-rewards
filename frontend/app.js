@@ -11,7 +11,7 @@ let state = {
     xp: 0,
     streak: 0,
     notifications: [],
-    config: {} // Sẽ được nạp từ server
+    config: {}
 };
 
 // ============ AD STATE ============
@@ -27,10 +27,13 @@ let isAdCompletedCalled = false;
 let resetToken = null;
 
 // ============ HCAPTCHA SITE KEY ============
-let HCAPTCHA_SITE_KEY = '5aa632cc-e278-444e-90aa-59aa63e00a36'; // fallback
+let HCAPTCHA_SITE_KEY = '5aa632cc-e278-444e-90aa-59aa63e00a36';
 
 // ============ DOM REFS ============
 let app = null;
+
+// ============ CONFIG POLLING ============
+let configRefreshInterval = null;
 
 // ============ API CLIENT ============
 const api = {
@@ -246,20 +249,22 @@ function resetAdState(keepVisible = false) {
         }
     }
     updateAdStatus();
+    updateWatchButton();
+}
+
+function updateWatchButton() {
     const btn = document.getElementById('watchBtn');
-    if (btn) {
-        const ptsPerAd = parseInt(state.config.points_per_ad) || 10;
-        btn.disabled = false;
-        btn.innerHTML = `<i class="fas fa-play"></i> Watch Ad (+${ptsPerAd} pts)`;
-    }
+    if (!btn) return;
+    const ptsPerAd = parseInt(state.config.points_per_ad) || 10;
+    btn.disabled = false;
+    btn.innerHTML = `<i class="fas fa-play"></i> Watch Ad (+${ptsPerAd} pts)`;
 }
 
 // ============ UPDATE REDEEM BUTTON ============
 function updateRedeemButton() {
     const btn = document.getElementById('redeemBtn');
     if (!btn) return;
-    const pointsPerXNO = parseInt(state.config.points_per_xno) || 500;
-    const minPoints = Math.ceil(pointsPerXNO / 10);
+    const minPoints = parseInt(state.config.min_redeem_points) || 50;
     if (state.points < minPoints) {
         btn.disabled = true;
         btn.textContent = `🔒 Need ${minPoints} pts`;
@@ -307,6 +312,9 @@ function render() {
     app.innerHTML = renderDashboard();
     attachEvents();
     updateRedeemButton();
+    updateWatchButton();
+    // Cập nhật UI từ config hiện tại
+    updateUIFromConfig();
 }
 
 // ============ RESET PASSWORD PAGE ============
@@ -513,7 +521,7 @@ function renderDashboard() {
     const { user, points, stats, config } = state;
     const pointsPerAd = parseInt(config.points_per_ad) || 10;
     const pointsPerXNO = parseInt(config.points_per_xno) || 500;
-    const minRedeem = Math.ceil(pointsPerXNO / 10);
+    const minRedeem = parseInt(config.min_redeem_points) || 50;
     const referralBonus = parseInt(config.referral_bonus) || 5;
 
     const progress = Math.min((stats.dailyUsed / stats.dailyLimit * 100), 100);
@@ -602,12 +610,12 @@ function renderDashboard() {
                     <div class="stat-card success">
                         <div class="stat-icon">⚡</div>
                         <div class="stat-label">XNO Balance</div>
-                        <div class="stat-value">${xnoEarned}</div>
+                        <div class="stat-value" id="xnoDisplay">${xnoEarned}</div>
                     </div>
                     <div class="stat-card warning">
                         <div class="stat-icon">📺</div>
                         <div class="stat-label">Ads Watched</div>
-                        <div class="stat-value">${stats.totalWatched}</div>
+                        <div class="stat-value" id="adsDisplay">${stats.totalWatched}</div>
                     </div>
                     <div class="stat-card purple">
                         <div class="stat-icon">📊</div>
@@ -625,7 +633,7 @@ function renderDashboard() {
                 <div class="actions-grid">
                     <div class="action-card">
                         <h3>📺 Watch Ad</h3>
-                        <p class="subtitle">Watch a short ad and earn <strong>${pointsPerAd} points</strong></p>
+                        <p class="subtitle">Watch a short ad and earn <strong id="pointsPerAdLabel">${pointsPerAd}</strong> points</p>
                         <button onclick="watchAd()" id="watchBtn" class="btn-action btn-watch">
                             <i class="fas fa-play"></i> Watch Ad (+${pointsPerAd} pts)
                         </button>
@@ -633,9 +641,12 @@ function renderDashboard() {
                     </div>
                     <div class="action-card">
                         <h3>🔄 Redeem XNO</h3>
-                        <p class="subtitle"><strong>${minRedeem} points</strong> = <strong>${(minRedeem / pointsPerXNO).toFixed(4)} XNO</strong> <br> <small>${pointsPerXNO} points = 1 XNO</small></p>
+                        <p class="subtitle">
+                            <strong>Tối thiểu <span id="minRedeemLabel">${minRedeem}</span> points</strong><br>
+                            <small><span id="pointsPerXnoLabel">${pointsPerXNO}</span> points = 1 XNO (linh hoạt)</small>
+                        </p>
                         <div class="redeem-input">
-                            <input type="number" id="redeemPoints" min="${minRedeem}" step="${minRedeem}" value="${minRedeem}" placeholder="Points">
+                            <input type="number" id="redeemPoints" min="${minRedeem}" step="1" value="${minRedeem}" placeholder="Points">
                             <input type="text" id="redeemWallet" placeholder="nano_1...">
                             <button onclick="redeem()" id="redeemBtn" class="btn-action btn-redeem">
                                 <i class="fas fa-exchange-alt"></i> Redeem
@@ -667,7 +678,7 @@ function renderDashboard() {
                         </div>
                     </div>
                     <p style="font-size:13px;color:var(--text-secondary);margin-top:8px;">
-                        Share your referral link and earn <strong style="color:var(--success);">${referralBonus} points</strong> for each friend who joins!
+                        Share your referral link and earn <strong style="color:var(--success);" id="referralBonusLabel">${referralBonus}</strong> points for each friend who joins!
                     </p>
                 </div>
 
@@ -699,6 +710,81 @@ function renderDashboard() {
             <div class="aads-status" id="aadsStatus">⏳ Click "Watch Ad" to start</div>
         </div>
     `;
+}
+
+// ============ UPDATE UI FROM CONFIG ============
+function updateUIFromConfig() {
+    const pointsPerAd = parseInt(state.config.points_per_ad) || 10;
+    const pointsPerXNO = parseInt(state.config.points_per_xno) || 500;
+    const minRedeem = parseInt(state.config.min_redeem_points) || 50;
+    const referralBonus = parseInt(state.config.referral_bonus) || 5;
+
+    // Watch button
+    const watchBtn = document.getElementById('watchBtn');
+    if (watchBtn && !watchBtn.disabled) {
+        watchBtn.innerHTML = `<i class="fas fa-play"></i> Watch Ad (+${pointsPerAd} pts)`;
+    }
+    // Points per ad label
+    const ppaLabel = document.getElementById('pointsPerAdLabel');
+    if (ppaLabel) ppaLabel.textContent = pointsPerAd;
+
+    // Min redeem label
+    const minLabel = document.getElementById('minRedeemLabel');
+    if (minLabel) minLabel.textContent = minRedeem;
+    // Points per XNO label
+    const ppxLabel = document.getElementById('pointsPerXnoLabel');
+    if (ppxLabel) ppxLabel.textContent = pointsPerXNO;
+
+    // Redeem input
+    const redeemInput = document.getElementById('redeemPoints');
+    if (redeemInput) {
+        redeemInput.min = minRedeem;
+        if (parseInt(redeemInput.value) < minRedeem) {
+            redeemInput.value = minRedeem;
+        }
+        redeemInput.placeholder = `Min ${minRedeem}`;
+    }
+
+    // Referral bonus label
+    const refLabel = document.getElementById('referralBonusLabel');
+    if (refLabel) refLabel.textContent = referralBonus;
+
+    // Redeem button
+    updateRedeemButton();
+
+    // Update stats that depend on config (XNO balance)
+    updateStats();
+}
+
+// ============ REFRESH CONFIG (polling) ============
+async function refreshConfig() {
+    try {
+        const res = await fetch(`${API_URL}/config`);
+        if (!res.ok) throw new Error('Failed to fetch config');
+        const data = await res.json();
+        state.config = data;
+        HCAPTCHA_SITE_KEY = data.hcaptchaSiteKey || HCAPTCHA_SITE_KEY;
+        // Cập nhật UI với config mới
+        updateUIFromConfig();
+        console.log('🔄 Config refreshed:', data);
+    } catch (error) {
+        console.warn('Failed to refresh config:', error);
+    }
+}
+
+function startConfigPolling() {
+    if (configRefreshInterval) clearInterval(configRefreshInterval);
+    // Poll every 15 seconds để phản hồi nhanh hơn
+    configRefreshInterval = setInterval(refreshConfig, 15000);
+    // Refresh ngay lập tức
+    refreshConfig();
+}
+
+function stopConfigPolling() {
+    if (configRefreshInterval) {
+        clearInterval(configRefreshInterval);
+        configRefreshInterval = null;
+    }
 }
 
 // ============ EVENTS ============
@@ -764,6 +850,8 @@ function attachEvents() {
             localStorage.setItem('refreshToken', data.refreshToken);
             state.user = data.user;
             await fetchPoints();
+            // Bắt đầu polling config
+            startConfigPolling();
             resetCaptcha();
             showNotification('Welcome back! 🎉', 'success');
             render();
@@ -989,7 +1077,7 @@ async function redeem() {
     const msg = document.getElementById('redeemMessage');
     const btn = document.getElementById('redeemBtn');
     const pointsPerXNO = parseInt(state.config.points_per_xno) || 500;
-    const minRedeem = Math.ceil(pointsPerXNO / 10);
+    const minRedeem = parseInt(state.config.min_redeem_points) || 50;
     const points = parseInt(pointsInput.value) || minRedeem;
 
     if (state.points < minRedeem) {
@@ -1060,9 +1148,9 @@ function updateStats() {
     const pointsPerXNO = parseInt(state.config.points_per_xno) || 500;
     const pointsEl = document.getElementById('pointsDisplay');
     if (pointsEl) pointsEl.textContent = state.points.toLocaleString();
-    const xnoEl = document.querySelector('.stat-card.success .stat-value');
+    const xnoEl = document.getElementById('xnoDisplay');
     if (xnoEl) xnoEl.textContent = (state.stats.totalEarned / pointsPerXNO).toFixed(4);
-    const adsEl = document.querySelector('.stat-card.warning .stat-value');
+    const adsEl = document.getElementById('adsDisplay');
     if (adsEl) adsEl.textContent = state.stats.totalWatched;
     const progressEl = document.querySelector('.stat-card.purple .fill');
     const progressText = document.querySelector('.stat-card.purple .progress-text');
@@ -1109,6 +1197,7 @@ function clearLog() {
 }
 
 function logout() {
+    stopConfigPolling();
     localStorage.removeItem('accessToken');
     localStorage.removeItem('refreshToken');
     state.user = null;
@@ -1121,7 +1210,7 @@ function showError(msg) {
     if (el) { el.textContent = msg; el.className = 'auth-error show'; }
 }
 
-// ============ LOAD CONFIG ============
+// ============ LOAD CONFIG (initial) ============
 async function loadConfig() {
     try {
         const res = await fetch(`${API_URL}/config`);
@@ -1131,7 +1220,14 @@ async function loadConfig() {
         return data;
     } catch (error) {
         console.warn('Failed to load config, using defaults:', error);
-        state.config = { points_per_ad: '10', points_per_xno: '500', referral_bonus: '5' };
+        state.config = { 
+            points_per_ad: '10', 
+            points_per_xno: '500', 
+            referral_bonus: '5',
+            min_redeem_points: '50',
+            daily_limit: '100',
+            streak_bonus_multiplier: '2'
+        };
         return state.config;
     }
 }
@@ -1160,6 +1256,8 @@ async function init() {
                 await fetchPoints();
                 const streakRes = await api.get('/streak');
                 if (!streakRes.error) state.streak = streakRes.streak || 0;
+                // Bắt đầu polling config
+                startConfigPolling();
             }
         } catch (error) {
             localStorage.removeItem('accessToken');
@@ -1187,4 +1285,4 @@ window.showLeaderboard = showLeaderboard;
 window.renderDashboard = renderDashboard;
 
 document.addEventListener('DOMContentLoaded', init);
-console.log('🚀 XNO Rewards App Loaded');
+console.log('🚀 XNO Rewards App Loaded - Config fully dynamic');
