@@ -25,11 +25,11 @@ function cleanUrlParams() {
 let state = {
     user: null,
     points: 0,
+    totalEarned: 0,
+    level: 1,
     stats: { totalWatched: 0, totalEarned: 0, dailyLimit: 100, dailyUsed: 0 },
     isLoading: false,
-    page: 'login',           // 'login' | 'register' | 'dashboard' | 'profile' | 'transactions' | 'notifications'
-    level: 1,
-    xp: 0,
+    page: 'login',
     streak: 0,
     notifications: [],
     config: {},
@@ -61,7 +61,7 @@ let isConfigListenerActive = false;
 // ============ CONFIG CACHE ============
 let configLoaded = false;
 let lastAppliedConfigHash = null;
-const CONFIG_TTL = 10 * 60 * 1000; // 10 phút
+const CONFIG_TTL = 10 * 60 * 1000;
 let configPromise = null;
 
 // ============ API CLIENT ============
@@ -253,10 +253,10 @@ function loadTheme() {
     updateThemeIcon(saved);
 }
 
-// ============ LEVEL ============
-function calculateLevel(points) {
-    const level = Math.floor(points / 100) + 1;
-    const xp = points % 100;
+// ============ LEVEL CALCULATION (dựa trên totalEarned) ============
+function calculateLevel(totalEarned) {
+    const level = Math.floor(totalEarned / 100) + 1;
+    const xp = totalEarned % 100;
     return { level, xp, nextLevelXp: 100 };
 }
 
@@ -412,7 +412,6 @@ function render() {
     updateRedeemButton();
     updateWatchButton();
     updateUIFromConfig();
-    // Cập nhật số thông báo chưa đọc
     updateNotificationBadge();
 }
 
@@ -578,7 +577,7 @@ function renderRegister() {
                 </div>
                 <div id="error" class="auth-error"></div>
                 <form id="registerForm" class="auth-form" method="POST" onsubmit="return false;">
-                    <input type="hidden" id="refCode" value="${refCode}">
+                    <input type="hidden" id="refCodeInputHidden" value="${refCode}">
                     <div class="form-group">
                         <label>Username</label>
                         <input type="text" id="username" placeholder="Choose a username" required>
@@ -605,6 +604,10 @@ function renderRegister() {
                         <label>Nano Wallet <small style="color:var(--text-tertiary);font-weight:400;">(optional)</small></label>
                         <input type="text" id="wallet" placeholder="nano_1...">
                     </div>
+                    <div class="form-group">
+                        <label>Referral Code (optional)</label>
+                        <input type="text" id="refCodeInput" placeholder="Enter referral code" value="${refCode}">
+                    </div>
                     <div id="captcha-container" class="form-group"></div>
                     <button type="submit" class="btn-primary" id="registerBtn">
                         <i class="fas fa-user-plus"></i> Create Account
@@ -620,7 +623,7 @@ function renderRegister() {
 
 // ============ DASHBOARD ============
 function renderDashboard() {
-    const { user, points, stats, config } = state;
+    const { user, points, stats, config, totalEarned } = state;
     const pointsPerAd = parseInt(config.points_per_ad) || 10;
     const pointsPerXNO = parseInt(config.points_per_xno) || 500;
     const minRedeem = parseInt(config.min_redeem_points) || 50;
@@ -628,7 +631,7 @@ function renderDashboard() {
 
     const progress = Math.min((stats.dailyUsed / stats.dailyLimit * 100), 100);
     const xnoEarned = (stats.totalEarned / pointsPerXNO).toFixed(4);
-    const { level, xp, nextLevelXp } = calculateLevel(points);
+    const { level, xp, nextLevelXp } = calculateLevel(totalEarned);
     const levelProgress = Math.min((xp / nextLevelXp) * 100, 100);
 
     return `
@@ -782,7 +785,7 @@ function renderDashboard() {
                     <div class="referral-header">
                         <h3><i class="fas fa-link" style="color:var(--primary);"></i> Referral Program</h3>
                         <div class="referral-code">
-                            <code>${user.username}-XNO</code>
+                            <code>${user.username}</code>
                             <button class="copy-btn" onclick="copyReferral()" title="Copy referral link">
                                 <i class="fas fa-copy"></i>
                             </button>
@@ -825,7 +828,7 @@ function renderDashboard() {
 
 // ============ PROFILE ============
 function renderProfile() {
-    const { user } = state;
+    const { user, points, totalEarned, level } = state;
     return `
         <div class="dashboard">
             <nav class="navbar">
@@ -882,8 +885,16 @@ function renderProfile() {
                             <input type="text" id="profileWallet" value="${user.walletAddress || ''}" placeholder="nano_1...">
                         </div>
                         <div class="form-group">
-                            <label>Points</label>
-                            <input type="text" value="${state.points}" disabled>
+                            <label>Current Points</label>
+                            <input type="text" value="${points}" disabled>
+                        </div>
+                        <div class="form-group">
+                            <label>Total Earned</label>
+                            <input type="text" value="${totalEarned}" disabled>
+                        </div>
+                        <div class="form-group">
+                            <label>Level</label>
+                            <input type="text" value="${level}" disabled>
                         </div>
                         <button type="submit" class="btn-primary">Save Changes</button>
                     </form>
@@ -1228,6 +1239,8 @@ function attachEvents() {
             localStorage.setItem('accessToken', data.accessToken);
             localStorage.setItem('refreshToken', data.refreshToken);
             state.user = data.user;
+            state.totalEarned = data.user.totalEarned || 0;
+            state.level = data.user.level || 1;
             await fetchPoints();
             startConfigListener();
             resetCaptcha();
@@ -1254,7 +1267,7 @@ function attachEvents() {
         const password = document.getElementById('password').value;
         const wallet = document.getElementById('wallet').value;
         const otpCode = document.getElementById('otpCode').value;
-        const refCode = document.getElementById('refCode').value;
+        const refCode = document.getElementById('refCodeInput').value || document.getElementById('refCodeInputHidden').value;
         const btn = document.getElementById('registerBtn');
         if (!otpCode || otpCode.length !== 4) { showError('Please enter 4-digit verification code'); return; }
         btn.disabled = true;
@@ -1303,7 +1316,6 @@ function attachEvents() {
         updateRedeemButton();
     });
 
-    // Load transactions when page is transactions
     if (state.page === 'transactions') {
         loadTransactionsData();
     }
@@ -1357,6 +1369,8 @@ async function claimDailyBonus() {
         const res = await api.post('/daily-bonus', {});
         if (res.error) throw new Error(res.error);
         state.points = res.newTotal;
+        state.totalEarned = res.totalEarned || state.totalEarned;
+        state.level = res.newLevel || state.level;
         state.streak = res.streak;
         await fetchPoints();
         showNotification(res.message, 'success');
@@ -1382,7 +1396,7 @@ async function showLeaderboard() {
         res.leaderboard.forEach((user, i) => {
             const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `#${i+1}`;
             html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--bg-input);border-radius:var(--radius-md);">
-                <span style="font-weight:600;">${medal} ${user.username}</span>
+                <span style="font-weight:600;">${medal} ${user.username} (Lv.${user.level})</span>
                 <span style="font-weight:700;color:var(--primary);">${user.points} pts</span>
             </div>`;
         });
@@ -1449,9 +1463,15 @@ async function onAdCompleted() {
         });
         if (verifyRes.error) throw new Error(verifyRes.error);
         state.points = verifyRes.newTotal;
+        state.totalEarned = verifyRes.totalEarned || state.totalEarned;
+        state.level = verifyRes.newLevel || state.level;
         await fetchPoints();
         const ptsPerAd = parseInt(state.config.points_per_ad) || 10;
-        addLog(`🎯 +${ptsPerAd} points from ad`);
+        let logMsg = `🎯 +${ptsPerAd} points from ad`;
+        if (verifyRes.bonusPoints && verifyRes.bonusPoints > 0) {
+            logMsg += ` + ${verifyRes.bonusPoints} bonus points (Level ${state.level})`;
+        }
+        addLog(logMsg);
         showNotification(`✅ +${ptsPerAd} points earned!`, 'success');
         updateStats();
         updateRedeemButton();
@@ -1542,6 +1562,8 @@ async function fetchPoints() {
         const data = await api.get('/points');
         if (!data.error) {
             state.points = data.points;
+            state.totalEarned = data.totalEarned || 0;
+            state.level = data.level || 1;
             state.stats = data.stats;
             updateRedeemButton();
         }
@@ -1573,7 +1595,9 @@ function updateStats() {
     if (heroXno) heroXno.textContent = (state.stats.totalEarned / pointsPerXNO).toFixed(4);
     const heroAds = document.querySelector('.hero-stats .stat-item:nth-child(3) .value');
     if (heroAds) heroAds.textContent = state.stats.totalWatched;
-    const { level, xp, nextLevelXp } = calculateLevel(state.points);
+    
+    const { level, xp, nextLevelXp } = calculateLevel(state.totalEarned);
+    state.level = level;
     const levelBadge = document.querySelector('.level-badge');
     if (levelBadge) levelBadge.textContent = `🏆 Level ${level}`;
     const levelProgress = document.querySelector('.hero-section .daily-progress .fill');
@@ -1652,7 +1676,6 @@ async function loadTransactionsData() {
             });
         }
         html += '</div>';
-        // XNO transactions
         html += '<div id="xnoList" class="tx-list" style="display:none;">';
         if (xno.length === 0) {
             html += '<p class="empty">No XNO transactions</p>';
@@ -1663,7 +1686,6 @@ async function loadTransactionsData() {
         }
         html += '</div>';
         container.innerHTML = html;
-        // Tab switching
         document.querySelectorAll('.tx-tab').forEach(tab => {
             tab.addEventListener('click', function() {
                 document.querySelectorAll('.tx-tab').forEach(t => t.classList.remove('active'));
@@ -1738,12 +1760,10 @@ async function init() {
     loadTheme();
     await loadConfig();
 
-    // Xử lý referral code từ URL
     const urlParams = new URLSearchParams(window.location.search);
     const refCode = urlParams.get('ref');
     if (refCode) {
         state.refCode = refCode;
-        // Xóa khỏi URL để không lộ
         const cleanUrl = new URL(window.location);
         cleanUrl.searchParams.delete('ref');
         window.history.replaceState({}, document.title, cleanUrl.toString());
@@ -1764,6 +1784,8 @@ async function init() {
             const data = await api.get('/auth/me');
             if (!data.error) {
                 state.user = data.user;
+                state.totalEarned = data.user.totalEarned || 0;
+                state.level = data.user.level || 1;
                 await fetchPoints();
                 const streakRes = await api.get('/streak');
                 if (!streakRes.error) state.streak = streakRes.streak || 0;

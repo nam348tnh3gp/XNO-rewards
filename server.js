@@ -61,6 +61,8 @@ try {
         password_hash TEXT NOT NULL,
         wallet_address TEXT,
         points INTEGER DEFAULT 0,
+        total_earned INTEGER DEFAULT 0,
+        level INTEGER DEFAULT 1,
         role TEXT DEFAULT 'user',
         is_verified INTEGER DEFAULT 0,
         referred_by INTEGER REFERENCES users(id),
@@ -187,11 +189,21 @@ try {
 try {
     db.exec('ALTER TABLE point_transactions ADD COLUMN reference_id TEXT');
     console.log('✅ Added reference_id column to point_transactions');
-} catch (e) { /* already exists */ }
+} catch (e) {}
 
 try {
     db.exec('ALTER TABLE ad_watch_history ADD COLUMN expires_at DATETIME');
     console.log('✅ Added expires_at column to ad_watch_history');
+} catch (e) {}
+
+try {
+    db.exec('ALTER TABLE users ADD COLUMN total_earned INTEGER DEFAULT 0');
+    console.log('✅ Added total_earned column to users');
+} catch (e) {}
+
+try {
+    db.exec('ALTER TABLE users ADD COLUMN level INTEGER DEFAULT 1');
+    console.log('✅ Added level column to users');
 } catch (e) {}
 
 try {
@@ -535,7 +547,7 @@ const auth = (req, res, next) => {
         }
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const user = db.prepare('SELECT id, username, email, role, points, is_verified, wallet_address, referred_by FROM users WHERE id = ?').get(decoded.userId);
+        const user = db.prepare('SELECT id, username, email, role, points, total_earned, level, is_verified, wallet_address, referred_by FROM users WHERE id = ?').get(decoded.userId);
 
         if (!user) {
             return res.status(401).json({ error: 'User not found' });
@@ -571,7 +583,7 @@ const adminAuthWeb = (req, res, next) => {
 
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const user = db.prepare('SELECT id, username, email, role, points, is_verified, wallet_address, referred_by FROM users WHERE id = ?').get(decoded.userId);
+        const user = db.prepare('SELECT id, username, email, role, points, total_earned, level, is_verified, wallet_address, referred_by FROM users WHERE id = ?').get(decoded.userId);
         if (!user || user.role !== 'admin') {
             return res.redirect('/admin/login');
         }
@@ -755,33 +767,52 @@ app.post('/api/auth/register', async (req, res) => {
 
         // Xử lý referral
         let referredBy = null;
+        let referrerUsername = null;
         if (refCode) {
-            const referrer = db.prepare('SELECT id FROM users WHERE username = ?').get(refCode);
-            if (referrer) {
+            const referrer = db.prepare('SELECT id, username FROM users WHERE username = ?').get(refCode.trim());
+            if (referrer && referrer.id) {
                 referredBy = referrer.id;
-                // Thưởng cho người giới thiệu
-                const referralBonus = parseInt(getConfigValue('referral_bonus')) || 5;
-                db.prepare('UPDATE users SET points = points + ? WHERE id = ?')
-                    .run(referralBonus, referrer.id);
-                db.prepare(`
-                    INSERT INTO point_transactions (user_id, amount, type, source)
-                    VALUES (?, ?, 'referral_bonus', ?)
-                `).run(referrer.id, referralBonus, `ref_${username}`);
-                // Gửi thông báo
-                db.prepare(`
-                    INSERT INTO notifications (user_id, title, message, type)
-                    VALUES (?, '🎉 Referral Bonus!', 'You earned ${referralBonus} points for referring ${username}', 'success')
-                `).run(referrer.id);
+                referrerUsername = referrer.username;
             }
         }
 
+        // Tạo user
         const stmt = db.prepare(`
-            INSERT INTO users (username, email, password_hash, wallet_address, is_verified, role, referred_by)
-            VALUES (?, ?, ?, ?, 1, ?, ?)
+            INSERT INTO users (username, email, password_hash, wallet_address, is_verified, role, referred_by, total_earned, level)
+            VALUES (?, ?, ?, ?, 1, ?, ?, 0, 1)
         `);
         const info = stmt.run(username, email, passwordHash, walletAddress || null, role, referredBy);
 
         db.prepare('DELETE FROM email_verifications WHERE email = ?').run(email);
+
+        // Thưởng referral
+        if (referredBy) {
+            // Thưởng người được mời: 10 pts
+            db.prepare('UPDATE users SET points = points + 10 WHERE id = ?').run(info.lastInsertRowid);
+            db.prepare(`
+                INSERT INTO point_transactions (user_id, amount, type, source, reference_id)
+                VALUES (?, 10, 'referral_bonus', ?, ?)
+            `).run(info.lastInsertRowid, `ref_${refCode}`, `new_user_${info.lastInsertRowid}`);
+
+            // Thưởng người mời: 5 pts
+            db.prepare('UPDATE users SET points = points + 5 WHERE id = ?').run(referredBy);
+            db.prepare(`
+                INSERT INTO point_transactions (user_id, amount, type, source, reference_id)
+                VALUES (?, 5, 'referral_bonus', ?, ?)
+            `).run(referredBy, `ref_${username}`, `invite_${info.lastInsertRowid}`);
+
+            // Thông báo cho người mời
+            db.prepare(`
+                INSERT INTO notifications (user_id, title, message, type)
+                VALUES (?, '🎉 Referral Bonus!', 'You earned 5 points for referring ${username}', 'success')
+            `).run(referredBy);
+
+            // Thông báo cho người được mời
+            db.prepare(`
+                INSERT INTO notifications (user_id, title, message, type)
+                VALUES (?, '🎉 Welcome Bonus!', 'You earned 10 points for joining via referral!', 'success')
+            `).run(info.lastInsertRowid);
+        }
 
         const welcomeMessage = isAdmin 
             ? 'Welcome Admin! You have full access to the dashboard.' 
@@ -867,6 +898,8 @@ app.post('/api/auth/login', async (req, res) => {
                 username: user.username,
                 email: user.email,
                 points: user.points,
+                totalEarned: user.total_earned,
+                level: user.level,
                 role: user.role,
                 isVerified: user.is_verified,
                 walletAddress: user.wallet_address
@@ -1002,7 +1035,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
 // -------- POINTS --------
 app.get('/api/points', auth, (req, res) => {
     try {
-        const user = db.prepare('SELECT points FROM users WHERE id = ?').get(req.user.id);
+        const user = db.prepare('SELECT points, total_earned, level FROM users WHERE id = ?').get(req.user.id);
         const stats = db.prepare(`
             SELECT
                 COUNT(CASE WHEN type = 'watch_ad' THEN 1 END) as total_watched,
@@ -1020,6 +1053,8 @@ app.get('/api/points', auth, (req, res) => {
 
         res.json({
             points: user.points,
+            totalEarned: user.total_earned,
+            level: user.level,
             stats: {
                 totalWatched: stats.total_watched || 0,
                 totalEarned: stats.total_earned || 0,
@@ -1151,6 +1186,7 @@ app.post('/api/ad/verify', auth, (req, res) => {
             return res.status(400).json({ error: 'Points already claimed for this session' });
         }
 
+        // Cập nhật trạng thái session
         try {
             db.prepare(`
                 UPDATE ad_watch_history
@@ -1162,9 +1198,14 @@ app.post('/api/ad/verify', auth, (req, res) => {
             return res.status(500).json({ error: 'Failed to update session' });
         }
 
+        // Cập nhật points và total_earned
         try {
+            // Cộng điểm vào points
             db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(pointsPerAd, req.user.id);
+            // Cập nhật total_earned
+            db.prepare('UPDATE users SET total_earned = total_earned + ? WHERE id = ?').run(pointsPerAd, req.user.id);
 
+            // Ghi transaction
             db.prepare(`
                 INSERT INTO point_transactions (user_id, amount, type, source, reference_id)
                 VALUES (?, ?, 'watch_ad', 'aads', ?)
@@ -1180,12 +1221,46 @@ app.post('/api/ad/verify', auth, (req, res) => {
             return res.status(500).json({ error: 'Failed to add points' });
         }
 
-        const user = db.prepare('SELECT points FROM users WHERE id = ?').get(req.user.id);
+        // ====== XỬ LÝ LEVEL BONUS ======
+        // Lấy thông tin user hiện tại
+        let user = db.prepare('SELECT id, points, total_earned, level FROM users WHERE id = ?').get(req.user.id);
+        const oldLevel = user.level;
+        const newLevel = Math.floor(user.total_earned / 100) + 1;
+
+        let bonusPoints = 0;
+        if (newLevel > oldLevel) {
+            // Cập nhật level mới
+            db.prepare('UPDATE users SET level = ? WHERE id = ?').run(newLevel, req.user.id);
+
+            // Thưởng bonus cho mỗi level vượt qua
+            for (let lv = oldLevel + 1; lv <= newLevel; lv++) {
+                const lvBonus = lv * 100; // Level 1: 100, Level 2: 200, Level 3: 300, ...
+                bonusPoints += lvBonus;
+                db.prepare(`
+                    INSERT INTO point_transactions (user_id, amount, type, source, reference_id)
+                    VALUES (?, ?, 'level_bonus', 'level_up', ?)
+                `).run(req.user.id, lvBonus, `level_${lv}`);
+                // Thông báo
+                db.prepare(`
+                    INSERT INTO notifications (user_id, title, message, type)
+                    VALUES (?, '🎉 Level Up!', 'Congratulations! You reached level ${lv} and earned ${lvBonus} bonus points!', 'success')
+                `).run(req.user.id);
+            }
+            // Cộng bonus vào points
+            if (bonusPoints > 0) {
+                db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(bonusPoints, req.user.id);
+            }
+
+            // Lấy lại user sau khi cập nhật
+            user = db.prepare('SELECT id, points, total_earned, level FROM users WHERE id = ?').get(req.user.id);
+        }
 
         res.json({
             success: true,
             pointsAdded: pointsPerAd,
             newTotal: user.points,
+            bonusPoints: bonusPoints,
+            newLevel: user.level,
             verified: true
         });
 
@@ -1226,6 +1301,7 @@ app.post('/api/redeem', auth, async (req, res) => {
 
         const xnoAmount = pointsToRedeem / pointsPerXNO;
 
+        // Trừ points (không ảnh hưởng đến total_earned và level)
         db.prepare('UPDATE users SET points = points - ? WHERE id = ?').run(pointsToRedeem, req.user.id);
 
         const stmt = db.prepare(`
@@ -1270,7 +1346,7 @@ app.post('/api/redeem', auth, async (req, res) => {
 app.get('/api/user/profile', auth, (req, res) => {
     try {
         const user = db.prepare(`
-            SELECT id, username, email, wallet_address, points, role, is_verified, created_at
+            SELECT id, username, email, wallet_address, points, total_earned, level, role, is_verified, created_at
             FROM users WHERE id = ?
         `).get(req.user.id);
         
@@ -1312,7 +1388,7 @@ app.put('/api/user/profile', auth, (req, res) => {
         params.push(req.user.id);
         db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`).run(...params);
         
-        const user = db.prepare('SELECT id, username, email, wallet_address, points, role, is_verified FROM users WHERE id = ?').get(req.user.id);
+        const user = db.prepare('SELECT id, username, email, wallet_address, points, total_earned, level, role, is_verified FROM users WHERE id = ?').get(req.user.id);
         res.json({ success: true, user });
     } catch (error) {
         console.error('❌ Update profile error:', error.message);
@@ -1371,7 +1447,7 @@ app.get('/api/referral/stats', auth, (req, res) => {
             WHERE user_id = ? AND type = 'referral_bonus'
         `).get(req.user.id);
         
-        const referralCode = `${req.user.username}-${req.user.id.toString().padStart(4, '0')}`;
+        const referralCode = req.user.username;
         
         res.json({
             referralCode,
@@ -1391,7 +1467,7 @@ app.post('/api/referral/claim', auth, (req, res) => {
             return res.status(400).json({ error: 'Referral code required' });
         }
         
-        const referred = db.prepare('SELECT id, points FROM users WHERE username = ?').get(referralCode.split('-')[0]);
+        const referred = db.prepare('SELECT id, points FROM users WHERE username = ?').get(referralCode);
         if (!referred) {
             return res.status(404).json({ error: 'Invalid referral code' });
         }
@@ -1440,7 +1516,7 @@ app.get('/api/leaderboard', (req, res) => {
     try {
         const limit = parseInt(req.query.limit) || 10;
         const topUsers = db.prepare(`
-            SELECT username, points, 
+            SELECT username, points, total_earned, level,
                    (SELECT COUNT(*) FROM users u2 WHERE u2.points > u1.points) + 1 as rank
             FROM users u1
             WHERE points > 0
@@ -1486,18 +1562,48 @@ app.post('/api/daily-bonus', auth, (req, res) => {
             bonus = Math.min(5 + streak * streakMultiplier, 50);
         }
         
+        // Cập nhật points
         db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(bonus, req.user.id);
+        // Cập nhật total_earned
+        db.prepare('UPDATE users SET total_earned = total_earned + ? WHERE id = ?').run(bonus, req.user.id);
+        
         db.prepare(`
             INSERT INTO point_transactions (user_id, amount, type, source)
             VALUES (?, ?, 'daily_bonus', ?)
         `).run(req.user.id, bonus, `day_${streak}`);
         
-        const user = db.prepare('SELECT points FROM users WHERE id = ?').get(req.user.id);
+        // ===== XỬ LÝ LEVEL BONUS =====
+        let user = db.prepare('SELECT id, points, total_earned, level FROM users WHERE id = ?').get(req.user.id);
+        const oldLevel = user.level;
+        const newLevel = Math.floor(user.total_earned / 100) + 1;
+        let bonusPoints = 0;
+        if (newLevel > oldLevel) {
+            db.prepare('UPDATE users SET level = ? WHERE id = ?').run(newLevel, req.user.id);
+            for (let lv = oldLevel + 1; lv <= newLevel; lv++) {
+                const lvBonus = lv * 100;
+                bonusPoints += lvBonus;
+                db.prepare(`
+                    INSERT INTO point_transactions (user_id, amount, type, source, reference_id)
+                    VALUES (?, ?, 'level_bonus', 'level_up', ?)
+                `).run(req.user.id, lvBonus, `level_${lv}`);
+                db.prepare(`
+                    INSERT INTO notifications (user_id, title, message, type)
+                    VALUES (?, '🎉 Level Up!', 'Congratulations! You reached level ${lv} and earned ${lvBonus} bonus points!', 'success')
+                `).run(req.user.id);
+            }
+            if (bonusPoints > 0) {
+                db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(bonusPoints, req.user.id);
+            }
+            user = db.prepare('SELECT points FROM users WHERE id = ?').get(req.user.id);
+        }
+        
         res.json({
             success: true,
             bonus: bonus,
             streak: streak,
             newTotal: user.points,
+            bonusPoints: bonusPoints,
+            newLevel: newLevel,
             message: `🎁 Daily bonus: +${bonus} points (${streak} day streak!)`
         });
     } catch (error) {
@@ -1540,7 +1646,6 @@ app.get('/api/notifications', auth, (req, res) => {
             LIMIT ?
         `).all(req.user.id, limit);
         
-        // Không tự động đánh dấu đã đọc, để client tự xử lý
         res.json({ notifications });
     } catch (error) {
         console.error('❌ Notifications error:', error.message);
@@ -1657,7 +1762,7 @@ app.get('/api/admin/stats', auth, admin, (req, res) => {
 app.get('/api/admin/users', auth, admin, (req, res) => {
     try {
         const users = db.prepare(`
-            SELECT id, username, email, points, role, is_verified, created_at
+            SELECT id, username, email, points, total_earned, level, role, is_verified, created_at
             FROM users ORDER BY created_at DESC LIMIT 100
         `).all();
         res.json(users);
@@ -1731,6 +1836,7 @@ app.post('/api/admin/ban/:userId', auth, admin, (req, res) => {
 });
 
 // ============ ADMIN WEB ROUTES ============
+// (Giữ nguyên như cũ, không thay đổi)
 app.get('/admin/login', (req, res) => {
     const token = req.cookies?.adminToken;
     if (token) {
@@ -2261,7 +2367,7 @@ app.get('/admin', adminAuthWeb, (req, res) => {
                     try {
                         const data = await fetchWithAuth(API_URL + '/admin/users');
                         if (!data) return;
-                        let html = '<h3>👥 Users</h3><div style="overflow-x:auto;"><table><thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Points</th><th>Role</th><th>Verified</th><th>Created</th></tr></thead><tbody>';
+                        let html = '<h3>👥 Users</h3><div style="overflow-x:auto;"><table><thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Points</th><th>Total Earned</th><th>Level</th><th>Role</th><th>Verified</th><th>Created</th></tr></thead><tbody>';
                         data.forEach(u => {
                             html += \`
                                 <tr>
@@ -2269,6 +2375,8 @@ app.get('/admin', adminAuthWeb, (req, res) => {
                                     <td>\${u.username}</td>
                                     <td>\${u.email}</td>
                                     <td>\${u.points}</td>
+                                    <td>\${u.total_earned}</td>
+                                    <td>\${u.level}</td>
                                     <td>\${u.role}</td>
                                     <td>\${u.is_verified ? '✅' : '❌'}</td>
                                     <td>\${new Date(u.created_at).toLocaleString()}</td>
@@ -2397,14 +2505,12 @@ app.get('/admin', adminAuthWeb, (req, res) => {
                         document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
                         this.classList.add('active');
                         document.getElementById('tab-' + this.dataset.tab).classList.add('active');
-                        // Load content if not loaded
                         if (this.dataset.tab === 'users') loadUsers();
                         if (this.dataset.tab === 'transactions') loadTransactions();
                         if (this.dataset.tab === 'config') loadConfig();
                     });
                 });
 
-                // Load initial tabs
                 loadStats();
                 loadSuspicious();
             </script>
