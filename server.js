@@ -190,22 +190,18 @@ try {
     db.exec('ALTER TABLE point_transactions ADD COLUMN reference_id TEXT');
     console.log('✅ Added reference_id column to point_transactions');
 } catch (e) {
-    console.log('ℹ️ reference_id column already exists');
+    // already exists
 }
 
 try {
     db.exec('ALTER TABLE ad_watch_history ADD COLUMN expires_at DATETIME');
     console.log('✅ Added expires_at column to ad_watch_history');
-} catch (e) {
-    console.log('ℹ️ expires_at column already exists');
-}
+} catch (e) {}
 
 try {
     db.exec('ALTER TABLE users ADD COLUMN referred_by INTEGER REFERENCES users(id)');
     console.log('✅ Added referred_by column to users');
-} catch (e) {
-    console.log('ℹ️ referred_by column already exists');
-}
+} catch (e) {}
 
 // ============ TẠO INDEX ============
 const createIndex = (sql) => {
@@ -292,6 +288,11 @@ function getAllConfig() {
     }
 }
 
+// ============ SERVER-SIDE CONFIG CACHE ============
+let configCache = null;
+let configCacheTime = 0;
+const CONFIG_CACHE_TTL = 60 * 1000; // 1 phút
+
 // ============ SSE CLIENTS & BROADCAST ============
 const sseClients = [];
 
@@ -301,7 +302,6 @@ function broadcastConfigUpdate(config) {
         try {
             res.write(`data: ${data}\n\n`);
         } catch (err) {
-            // Xoá client lỗi
             sseClients.splice(index, 1);
         }
     });
@@ -483,6 +483,14 @@ const verifyHCaptcha = async (token) => {
 // ============ MIDDLEWARE ============
 app.set('trust proxy', true);
 
+// Giới hạn độ dài URL để tránh lỗi 414
+app.use((req, res, next) => {
+    if (req.url.length > 2048) {
+        return res.status(414).json({ error: 'URI too long' });
+    }
+    next();
+});
+
 app.use(cookieParser());
 
 app.use(helmet({
@@ -496,8 +504,16 @@ app.use(cors({
 }));
 
 app.use(compression());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// Thêm header chống cache cho tất cả API
+app.use('/api', (req, res, next) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    next();
+});
 
 app.use((req, res, next) => {
     console.log(`📨 ${req.method} ${req.url} - ${req.ip} - ${req.get('origin') || 'same-origin'}`);
@@ -575,13 +591,21 @@ const adminAuthWeb = (req, res, next) => {
 
 // ============ API ROUTES ============
 
+// ----- CONFIG (có cache server) -----
 app.get('/api/config', (req, res) => {
+    const now = Date.now();
+    if (configCache && (now - configCacheTime) < CONFIG_CACHE_TTL) {
+        return res.json(configCache);
+    }
+
     const config = getAllConfig();
-    res.json({
+    configCache = {
         ...config,
         hcaptchaSiteKey: process.env.HCAPTCHA_SITE_KEY || '5aa632cc-e278-444e-90aa-59aa63e00a36',
         adminEmail: ADMIN_EMAIL
-    });
+    };
+    configCacheTime = now;
+    res.json(configCache);
 });
 
 // ============ SSE STREAM ============
@@ -591,7 +615,6 @@ app.get('/api/config/stream', (req, res) => {
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
     });
-    // Gửi config hiện tại ngay khi kết nối
     const config = getAllConfig();
     res.write(`data: ${JSON.stringify({ event: 'config-updated', config })}\n\n`);
 
@@ -619,7 +642,9 @@ app.put('/api/admin/config', auth, admin, (req, res) => {
         }
         if (setConfigValue(key, numericValue)) {
             const newConfig = getAllConfig();
-            // Broadcast cho tất cả client SSE
+            // Xóa cache để lần request tiếp theo lấy mới
+            configCache = null;
+            configCacheTime = 0;
             broadcastConfigUpdate(newConfig);
             res.json({ 
                 success: true, 

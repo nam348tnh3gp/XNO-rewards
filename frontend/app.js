@@ -1,5 +1,26 @@
 const API_URL = window.location.origin + '/api';
 
+// ============ CLEAN URL ============
+function cleanUrlParams() {
+    const url = new URL(window.location);
+    let changed = false;
+    if (url.searchParams.has('h-captcha-response')) {
+        url.searchParams.delete('h-captcha-response');
+        changed = true;
+    }
+    if (url.searchParams.has('hcaptcha')) {
+        url.searchParams.delete('hcaptcha');
+        changed = true;
+    }
+    if (url.searchParams.has('captcha')) {
+        url.searchParams.delete('captcha');
+        changed = true;
+    }
+    if (changed) {
+        window.history.replaceState({}, document.title, url.toString());
+    }
+}
+
 // ============ STATE ============
 let state = {
     user: null,
@@ -32,14 +53,15 @@ let HCAPTCHA_SITE_KEY = '5aa632cc-e278-444e-90aa-59aa63e00a36';
 // ============ DOM REFS ============
 let app = null;
 
-// ============ WEBSOCKET / SSE FOR REAL-TIME CONFIG ============
+// ============ WEBSOCKET / SSE ============
 let configEventSource = null;
 let isConfigListenerActive = false;
 
 // ============ CONFIG CACHE ============
 let configLoaded = false;
 let lastAppliedConfigHash = null;
-const CONFIG_TTL = 5 * 60 * 1000; // 5 phút
+const CONFIG_TTL = 10 * 60 * 1000; // 10 phút
+let configPromise = null;          // 🛡️ Promise cache
 
 // ============ API CLIENT ============
 const api = {
@@ -92,6 +114,15 @@ const api = {
     }
 };
 
+// ============ DEBOUNCE ============
+function debounce(fn, delay = 500) {
+    let timer = null;
+    return function(...args) {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn.apply(this, args), delay);
+    };
+}
+
 // ============ REFRESH TOKEN ============
 async function refreshToken() {
     try {
@@ -112,7 +143,7 @@ async function refreshToken() {
     }
 }
 
-// ============ HCAPTCHA HELPERS ============
+// ============ HCAPTCHA ============
 let captchaWidgetId = null;
 
 function renderCaptcha(containerId) {
@@ -122,11 +153,21 @@ function renderCaptcha(containerId) {
     const captchaDiv = document.createElement('div');
     captchaDiv.className = 'h-captcha';
     captchaDiv.setAttribute('data-sitekey', HCAPTCHA_SITE_KEY);
+    captchaDiv.setAttribute('data-callback', 'onCaptchaSuccess');
+    captchaDiv.setAttribute('data-expired-callback', 'onCaptchaExpired');
     container.appendChild(captchaDiv);
     if (typeof hcaptcha !== 'undefined') {
         captchaWidgetId = hcaptcha.render(captchaDiv);
     }
 }
+
+// Các callback này chỉ để ngăn hCaptcha tự động submit form
+window.onCaptchaSuccess = function(token) {
+    // Không làm gì, chỉ lưu token (sẽ lấy bằng getCaptchaResponse khi submit)
+};
+window.onCaptchaExpired = function() {
+    resetCaptcha();
+};
 
 function getCaptchaResponse() {
     try {
@@ -143,7 +184,7 @@ function resetCaptcha() {
     } catch (e) {}
 }
 
-// ============ THEME TOGGLE ============
+// ============ THEME ============
 function toggleTheme() {
     const html = document.documentElement;
     const current = html.getAttribute('data-theme');
@@ -165,14 +206,14 @@ function loadTheme() {
     updateThemeIcon(saved);
 }
 
-// ============ LEVEL SYSTEM ============
+// ============ LEVEL ============
 function calculateLevel(points) {
     const level = Math.floor(points / 100) + 1;
     const xp = points % 100;
     return { level, xp, nextLevelXp: 100 };
 }
 
-// ============ INTERSECTION OBSERVER ============
+// ============ AD OBSERVER ============
 function initAdObserver() {
     const banner = document.getElementById('aadsBanner');
     if (!banner) return;
@@ -191,7 +232,6 @@ function initAdObserver() {
     adObserver.observe(banner);
 }
 
-// ============ AD COUNTING ============
 function startAdCounting() {
     if (adWatchInterval) return;
     adVisibleDuration = 0;
@@ -280,7 +320,7 @@ function updateRedeemButton() {
     }
 }
 
-// ============ SHOW NOTIFICATION ============
+// ============ NOTIFICATION ============
 function showNotification(message, type = 'success') {
     const colors = { success: '#32D74B', error: '#FF375F', warning: '#FF9F0A', info: '#0A84FF' };
     const el = document.createElement('div');
@@ -301,7 +341,7 @@ function showNotification(message, type = 'success') {
     setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.3s'; setTimeout(() => el.remove(), 300); }, 4000);
 }
 
-// ============ RENDER FUNCTIONS ============
+// ============ RENDER ============
 function render() {
     app = document.getElementById('app');
     if (resetToken) {
@@ -322,7 +362,7 @@ function render() {
     updateUIFromConfig();
 }
 
-// ============ RESET PASSWORD PAGE ============
+// ============ RESET PASSWORD ============
 function renderResetPassword() {
     return `
         <div class="auth-container">
@@ -367,6 +407,7 @@ function renderResetPassword() {
 function attachResetEvents() {
     document.getElementById('resetForm')?.addEventListener('submit', async (e) => {
         e.preventDefault();
+        e.stopPropagation();
         const token = document.getElementById('resetToken').value;
         const newPassword = document.getElementById('newPassword').value;
         const confirm = document.getElementById('confirmPassword').value;
@@ -412,7 +453,7 @@ function attachResetEvents() {
     });
 }
 
-// ============ LOGIN PAGE ============
+// ============ LOGIN ============
 function renderLogin() {
     return `
         <div class="auth-container">
@@ -432,7 +473,7 @@ function renderLogin() {
                     <p>Earn Nano by watching ads</p>
                 </div>
                 <div id="error" class="auth-error"></div>
-                <form id="loginForm" class="auth-form">
+                <form id="loginForm" class="auth-form" method="POST" onsubmit="return false;">
                     <div class="form-group">
                         <label>Email Address</label>
                         <input type="email" id="email" placeholder="you@example.com" required>
@@ -461,7 +502,7 @@ function renderLogin() {
     `;
 }
 
-// ============ REGISTER PAGE ============
+// ============ REGISTER ============
 function renderRegister() {
     return `
         <div class="auth-container">
@@ -481,7 +522,7 @@ function renderRegister() {
                     <p>Get verified with a 4-digit code</p>
                 </div>
                 <div id="error" class="auth-error"></div>
-                <form id="registerForm" class="auth-form">
+                <form id="registerForm" class="auth-form" method="POST" onsubmit="return false;">
                     <div class="form-group">
                         <label>Username</label>
                         <input type="text" id="username" placeholder="Choose a username" required>
@@ -648,7 +689,7 @@ function renderDashboard() {
                         <h3>🔄 Redeem XNO</h3>
                         <p class="subtitle">
                             <strong>Tối thiểu <span id="minRedeemLabel">${minRedeem}</span> points</strong><br>
-                            <small><span id="pointsPerXnoLabel">${pointsPerXNO}</span> points = 1 XNO (linh hoạt)</small>
+                            <small><span id="pointsPerXnoLabel">${pointsPerXNO}</span> points = 1 XNO</small>
                         </p>
                         <div class="redeem-input">
                             <input type="number" id="redeemPoints" min="${minRedeem}" step="1" value="${minRedeem}" placeholder="Points">
@@ -717,7 +758,7 @@ function renderDashboard() {
     `;
 }
 
-// ============ UPDATE UI FROM CONFIG ============
+// ============ CONFIG ============
 function generateConfigHash(config) {
     const keys = ['points_per_ad', 'points_per_xno', 'min_redeem_points', 'referral_bonus', 'daily_limit', 'streak_bonus_multiplier'];
     return keys.map(k => `${k}=${config[k] || ''}`).join('|');
@@ -725,12 +766,10 @@ function generateConfigHash(config) {
 
 function updateUIFromConfig() {
     const currentHash = generateConfigHash(state.config);
-    
     if (currentHash === lastAppliedConfigHash) {
         console.log('⏭️ Config unchanged, skipping UI update');
         return;
     }
-    
     console.log('🔄 Config changed, updating UI...');
     lastAppliedConfigHash = currentHash;
 
@@ -743,16 +782,12 @@ function updateUIFromConfig() {
     if (watchBtn && !watchBtn.disabled) {
         watchBtn.innerHTML = `<i class="fas fa-play"></i> Watch Ad (+${pointsPerAd} pts)`;
     }
-    
     const ppaLabel = document.getElementById('pointsPerAdLabel');
     if (ppaLabel) ppaLabel.textContent = pointsPerAd;
-
     const minLabel = document.getElementById('minRedeemLabel');
     if (minLabel) minLabel.textContent = minRedeem;
-    
     const ppxLabel = document.getElementById('pointsPerXnoLabel');
     if (ppxLabel) ppxLabel.textContent = pointsPerXNO;
-
     const redeemInput = document.getElementById('redeemPoints');
     if (redeemInput) {
         redeemInput.min = minRedeem;
@@ -761,120 +796,109 @@ function updateUIFromConfig() {
             redeemInput.value = minRedeem;
         }
     }
-
     const refLabel = document.getElementById('referralBonusLabel');
     if (refLabel) refLabel.textContent = referralBonus;
-
     updateRedeemButton();
     updateStats();
     showNotification('⚙️ System config updated!', 'info');
 }
 
 // ============ LOAD CONFIG (CHỈ 1 LẦN DUY NHẤT) ============
-async function loadConfig() {
-    // Nếu đã load config trong phiên này thì không gọi lại
-    if (configLoaded) {
-        console.log('ℹ️ Config already loaded, using cached');
-        return state.config;
+async function loadConfig(forceRefresh = false) {
+    if (forceRefresh) {
+        configLoaded = false;
+        configPromise = null;
+        localStorage.removeItem('xno_config_cache');
     }
-
-    // Kiểm tra cache trong localStorage    const cached = localStorage.getItem('xno_config_cache');
-    if (cached) {
-        try {
-            const { data, timestamp } = JSON.parse(cached);
-            if (Date.now() - timestamp < CONFIG_TTL) {
-                state.config = data;
-                HCAPTCHA_SITE_KEY = data.hcaptchaSiteKey || HCAPTCHA_SITE_KEY;
-                lastAppliedConfigHash = generateConfigHash(data);
-                configLoaded = true;
-                console.log('✅ Config loaded from cache (TTL valid)');
-                return data;
-            }
-            console.log('ℹ️ Config cache expired, reloading...');
-        } catch (e) {
-            console.warn('⚠️ Invalid cache, reloading...');
+    if (configPromise) return configPromise;
+    if (configLoaded) {
+        const cached = localStorage.getItem('xno_config_cache');
+        if (cached) {
+            try {
+                const { data, timestamp } = JSON.parse(cached);
+                if (Date.now() - timestamp < CONFIG_TTL) {
+                    state.config = data;
+                    HCAPTCHA_SITE_KEY = data.hcaptchaSiteKey || HCAPTCHA_SITE_KEY;
+                    lastAppliedConfigHash = generateConfigHash(data);
+                    return state.config;
+                } else {
+                    localStorage.removeItem('xno_config_cache');
+                    configLoaded = false;
+                }
+            } catch (e) { configLoaded = false; }
+        } else {
+            configLoaded = false;
         }
     }
 
-    // Gọi API lấy config
-    try {
-        console.log('📡 Fetching config from API...');
-        const res = await fetch(`${API_URL}/config`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        
-        state.config = data;
-        HCAPTCHA_SITE_KEY = data.hcaptchaSiteKey || HCAPTCHA_SITE_KEY;
-        lastAppliedConfigHash = generateConfigHash(data);
-        
-        // Lưu cache
-        localStorage.setItem('xno_config_cache', JSON.stringify({
-            data: data,
-            timestamp: Date.now()
-        }));
-        
-        configLoaded = true;
-        console.log('✅ Config loaded from API');
-        return data;
-    } catch (error) {
-        console.warn('⚠️ Failed to load config, using defaults:', error);
-        state.config = { 
-            points_per_ad: '10', 
-            points_per_xno: '500', 
-            referral_bonus: '5',
-            min_redeem_points: '50',
-            daily_limit: '100',
-            streak_bonus_multiplier: '2'
-        };
-        lastAppliedConfigHash = generateConfigHash(state.config);
-        configLoaded = true;
-        return state.config;
-    }
+    configPromise = (async () => {
+        try {
+            console.log('📡 Fetching config from API (only once)');
+            const res = await fetch(`${API_URL}/config`, {
+                headers: {
+                    'Cache-Control': 'no-cache, no-store, must-revalidate',
+                    'Pragma': 'no-cache'
+                }
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+
+            state.config = data;
+            HCAPTCHA_SITE_KEY = data.hcaptchaSiteKey || HCAPTCHA_SITE_KEY;
+            lastAppliedConfigHash = generateConfigHash(data);
+            localStorage.setItem('xno_config_cache', JSON.stringify({ data, timestamp: Date.now() }));
+            configLoaded = true;
+            return data;
+        } catch (error) {
+            console.warn('⚠️ Failed to load config, using defaults:', error);
+            state.config = {
+                points_per_ad: '10',
+                points_per_xno: '500',
+                referral_bonus: '5',
+                min_redeem_points: '50',
+                daily_limit: '100',
+                streak_bonus_multiplier: '2'
+            };
+            lastAppliedConfigHash = generateConfigHash(state.config);
+            configLoaded = true;
+            return state.config;
+        } finally {
+            configPromise = null;
+        }
+    })();
+    return configPromise;
 }
 
-// ============ REAL-TIME CONFIG VIA SSE ============
+// ============ SSE ============
 function startConfigListener() {
-    if (isConfigListenerActive) {
-        console.log('ℹ️ Config listener already active');
-        return;
-    }
-
+    if (isConfigListenerActive) return;
     try {
         configEventSource = new EventSource(`${API_URL}/config/stream`);
-        
         configEventSource.onopen = () => {
             console.log('🔌 Config SSE connected');
             isConfigListenerActive = true;
         };
-
         configEventSource.addEventListener('config-updated', (event) => {
             try {
                 const data = JSON.parse(event.data);
-                console.log('📡 Config update received from server:', data);
-                
                 state.config = data.config || data;
                 HCAPTCHA_SITE_KEY = data.hcaptchaSiteKey || HCAPTCHA_SITE_KEY;
-                
-                // Cập nhật cache
                 localStorage.setItem('xno_config_cache', JSON.stringify({
                     data: state.config,
                     timestamp: Date.now()
                 }));
-                
                 lastAppliedConfigHash = generateConfigHash(state.config);
                 updateUIFromConfig();
             } catch (err) {
                 console.error('❌ Error processing config update:', err);
             }
         });
-
         configEventSource.onerror = (error) => {
             console.warn('⚠️ SSE error, will reconnect...', error);
         };
-
         console.log('📡 Config listener started (SSE)');
     } catch (error) {
-        console.warn('⚠️ SSE not supported, falling back to single load only:', error);
+        console.warn('⚠️ SSE not supported', error);
     }
 }
 
@@ -891,10 +915,10 @@ function stopConfigListener() {
 function attachEvents() {
     loadTheme();
 
-    document.getElementById('sendOtpBtn')?.addEventListener('click', async () => {
+    document.getElementById('sendOtpBtn')?.addEventListener('click', debounce(async function() {
         const email = document.getElementById('email').value;
         const statusEl = document.getElementById('otpStatus');
-        const btn = document.getElementById('sendOtpBtn');
+        const btn = this;
         if (!email || !email.includes('@')) {
             statusEl.textContent = '❌ Please enter a valid email';
             statusEl.className = 'otp-status error';
@@ -927,10 +951,11 @@ function attachEvents() {
             btn.disabled = false;
             btn.innerHTML = '<i class="fas fa-paper-plane"></i> Send';
         }
-    });
+    }, 800));
 
-    document.getElementById('loginForm')?.addEventListener('submit', async (e) => {
+    document.getElementById('loginForm')?.addEventListener('submit', debounce(async function(e) {
         e.preventDefault();
+        e.stopPropagation(); // 🛡️ ngăn lan truyền sự kiện
         const token = getCaptchaResponse();
         if (!token || token.length === 0) { showError('Please complete hCaptcha verification'); return; }
         const email = document.getElementById('email').value;
@@ -961,10 +986,11 @@ function attachEvents() {
             btn.disabled = false;
             btn.innerHTML = '<i class="fas fa-sign-in-alt"></i> Sign In';
         }
-    });
+    }, 500));
 
-    document.getElementById('registerForm')?.addEventListener('submit', async (e) => {
+    document.getElementById('registerForm')?.addEventListener('submit', debounce(async function(e) {
         e.preventDefault();
+        e.stopPropagation(); // 🛡️ ngăn lan truyền sự kiện
         const token = getCaptchaResponse();
         if (!token || token.length === 0) { showError('Please complete hCaptcha verification'); return; }
         const username = document.getElementById('username').value;
@@ -995,7 +1021,7 @@ function attachEvents() {
             btn.disabled = false;
             btn.innerHTML = '<i class="fas fa-user-plus"></i> Create Account';
         }
-    });
+    }, 500));
 
     document.getElementById('aadsBannerClose')?.addEventListener('click', () => {
         resetAdState(false);
@@ -1312,8 +1338,9 @@ function showError(msg) {
 
 // ============ BOOT ============
 async function init() {
+    cleanUrlParams(); // 🧹 xoá token khỏi URL ngay khi tải trang
     loadTheme();
-    await loadConfig();
+    await loadConfig();   // chỉ gọi một lần duy nhất
 
     const path = window.location.pathname;
     const match = path.match(/^\/reset-password\/([a-f0-9]{64})$/);
@@ -1343,7 +1370,7 @@ async function init() {
     render();
 }
 
-// ============ EXPOSE GLOBALS ============
+// ============ EXPOSE ============
 window.state = state;
 window.render = render;
 window.watchAd = watchAd;
@@ -1361,4 +1388,4 @@ window.showLeaderboard = showLeaderboard;
 window.renderDashboard = renderDashboard;
 
 document.addEventListener('DOMContentLoaded', init);
-console.log('🚀 XNO Rewards App Loaded - Config via SSE (real-time, no polling)');
+console.log('🚀 XNO Rewards App Loaded - Config fetched only once, debounced events, hCaptcha token never appears in URL');
