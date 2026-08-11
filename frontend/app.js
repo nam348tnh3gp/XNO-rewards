@@ -719,6 +719,8 @@ function updateUIFromConfig() {
     const minRedeem = parseInt(state.config.min_redeem_points) || 50;
     const referralBonus = parseInt(state.config.referral_bonus) || 5;
 
+    console.log('🔄 Updating UI with config:', { pointsPerAd, pointsPerXNO, minRedeem, referralBonus });
+
     // Watch button
     const watchBtn = document.getElementById('watchBtn');
     if (watchBtn && !watchBtn.disabled) {
@@ -774,17 +776,29 @@ async function refreshConfig() {
 
 function startConfigPolling() {
     if (configRefreshInterval) clearInterval(configRefreshInterval);
-    // Poll every 15 seconds để phản hồi nhanh hơn
-    configRefreshInterval = setInterval(refreshConfig, 15000);
+    // Poll mỗi 3 giây để phản hồi nhanh
+    configRefreshInterval = setInterval(refreshConfig, 3000);
     // Refresh ngay lập tức
     refreshConfig();
+    console.log('🔄 Config polling started (every 3s)');
 }
 
 function stopConfigPolling() {
     if (configRefreshInterval) {
         clearInterval(configRefreshInterval);
         configRefreshInterval = null;
+        console.log('🔄 Config polling stopped');
     }
+}
+
+// ============ VISIBILITY CHANGE HANDLER ============
+function setupVisibilityRefresh() {
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && state.user) {
+            console.log('👁️ Tab visible, refreshing config...');
+            refreshConfig();
+        }
+    });
 }
 
 // ============ EVENTS ============
@@ -1265,6 +1279,8 @@ async function init() {
         }
     }
     render();
+    // Setup visibility change listener
+    setupVisibilityRefresh();
 }
 
 // ============ EXPOSE GLOBALS ============
@@ -1277,12 +1293,13 @@ window.clearLog = clearLog;
 window.addLog = addLog;
 window.updateStats = updateStats;
 window.forgotPassword = forgotPassword;
-window.updateRedeemButton = updateRedeemButton;
+window.updateRedeemButton = updateRedeenButton;
 window.toggleTheme = toggleTheme;
 window.copyReferral = copyReferral;
 window.claimDailyBonus = claimDailyBonus;
 window.showLeaderboard = showLeaderboard;
 window.renderDashboard = renderDashboard;
+window.refreshConfig = refreshConfig; // để debug
 
 document.addEventListener('DOMContentLoaded', init);
-console.log('🚀 XNO Rewards App Loaded - Config fully dynamic');
+console.log('🚀 XNO Rewards App Loaded - Config polling every 3s + visibility refresh');
