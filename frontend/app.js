@@ -32,8 +32,9 @@ let HCAPTCHA_SITE_KEY = '5aa632cc-e278-444e-90aa-59aa63e00a36';
 // ============ DOM REFS ============
 let app = null;
 
-// ============ CONFIG POLLING ============
-let configRefreshInterval = null;
+// ============ WEBSOCKET / SSE FOR REAL-TIME CONFIG ============
+let configEventSource = null;
+let isConfigListenerActive = false;
 
 // ============ API CLIENT ============
 const api = {
@@ -260,7 +261,7 @@ function updateWatchButton() {
     btn.innerHTML = `<i class="fas fa-play"></i> Watch Ad (+${ptsPerAd} pts)`;
 }
 
-// ============ UPDATE REDEEM BUTTON (FIXED) ============
+// ============ UPDATE REDEEM BUTTON ============
 function updateRedeemButton() {
     const btn = document.getElementById('redeemBtn');
     if (!btn) return;
@@ -711,92 +712,140 @@ function renderDashboard() {
     `;
 }
 
-// ============ UPDATE UI FROM CONFIG (FIXED) ============
+// ============ UPDATE UI FROM CONFIG ============
+let lastAppliedConfigHash = null;
+
+function generateConfigHash(config) {
+    const keys = ['points_per_ad', 'points_per_xno', 'min_redeem_points', 'referral_bonus', 'daily_limit', 'streak_bonus_multiplier'];
+    return keys.map(k => `${k}=${config[k] || ''}`).join('|');
+}
+
 function updateUIFromConfig() {
+    const currentHash = generateConfigHash(state.config);
+    
+    if (currentHash === lastAppliedConfigHash) {
+        console.log('⏭️ Config unchanged, skipping UI update');
+        return;
+    }
+    
+    console.log('🔄 Config changed, updating UI...');
+    lastAppliedConfigHash = currentHash;
+
     const pointsPerAd = parseInt(state.config.points_per_ad) || 10;
     const pointsPerXNO = parseInt(state.config.points_per_xno) || 500;
     const minRedeem = parseInt(state.config.min_redeem_points) || 50;
     const referralBonus = parseInt(state.config.referral_bonus) || 5;
-
-    console.log('🔄 Updating UI with config:', { pointsPerAd, pointsPerXNO, minRedeem, referralBonus });
 
     // Watch button
     const watchBtn = document.getElementById('watchBtn');
     if (watchBtn && !watchBtn.disabled) {
         watchBtn.innerHTML = `<i class="fas fa-play"></i> Watch Ad (+${pointsPerAd} pts)`;
     }
-    // Points per ad label
+    
     const ppaLabel = document.getElementById('pointsPerAdLabel');
     if (ppaLabel) ppaLabel.textContent = pointsPerAd;
 
-    // Min redeem label
     const minLabel = document.getElementById('minRedeemLabel');
     if (minLabel) minLabel.textContent = minRedeem;
-    // Points per XNO label
+    
     const ppxLabel = document.getElementById('pointsPerXnoLabel');
     if (ppxLabel) ppxLabel.textContent = pointsPerXNO;
 
-    // Redeem input - FIXED: update min attribute and placeholder
     const redeemInput = document.getElementById('redeemPoints');
     if (redeemInput) {
         redeemInput.min = minRedeem;
         redeemInput.placeholder = `Min ${minRedeem}`;
-        // Nếu giá trị hiện tại nhỏ hơn min, set về min
         if (parseInt(redeemInput.value) < minRedeem) {
             redeemInput.value = minRedeem;
         }
     }
 
-    // Referral bonus label
     const refLabel = document.getElementById('referralBonusLabel');
     if (refLabel) refLabel.textContent = referralBonus;
 
-    // Redeem button - FIXED: gọi đúng tên
     updateRedeemButton();
-
-    // Update stats that depend on config (XNO balance)
     updateStats();
+    
+    // Hiển thị thông báo cho user biết config đã thay đổi
+    showNotification('⚙️ System config updated!', 'info');
 }
 
-// ============ REFRESH CONFIG (polling) ============
-async function refreshConfig() {
+// ============ REAL-TIME CONFIG VIA SERVER-SENT EVENTS (SSE) ============
+function startConfigListener() {
+    if (isConfigListenerActive) {
+        console.log('ℹ️ Config listener already active');
+        return;
+    }
+
+    try {
+        // Sử dụng EventSource để lắng nghe sự kiện từ server
+        configEventSource = new EventSource(`${API_URL}/config/stream`);
+        
+        configEventSource.onopen = () => {
+            console.log('🔌 Config SSE connected');
+            isConfigListenerActive = true;
+        };
+
+        configEventSource.addEventListener('config-updated', (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                console.log('📡 Config update received from server:', data);
+                
+                // Cập nhật config mới
+                state.config = data.config || data;
+                HCAPTCHA_SITE_KEY = data.hcaptchaSiteKey || HCAPTCHA_SITE_KEY;
+                
+                // Update UI
+                updateUIFromConfig();
+            } catch (err) {
+                console.error('❌ Error processing config update:', err);
+            }
+        });
+
+        configEventSource.onerror = (error) => {
+            console.warn('⚠️ SSE error, will reconnect...', error);
+            // EventSource tự động reconnect, chỉ cần log
+        };
+
+        console.log('📡 Config listener started (SSE)');
+    } catch (error) {
+        console.warn('⚠️ SSE not supported, falling back to single load only:', error);
+        // Fallback: chỉ load 1 lần, không poll
+    }
+}
+
+function stopConfigListener() {
+    if (configEventSource) {
+        configEventSource.close();
+        configEventSource = null;
+        isConfigListenerActive = false;
+        console.log('🔌 Config listener stopped');
+    }
+}
+
+// ============ LOAD CONFIG (CHỈ 1 LẦN KHI KHỞI TẠO) ============
+async function loadConfig() {
     try {
         const res = await fetch(`${API_URL}/config`);
-        if (!res.ok) throw new Error('Failed to fetch config');
         const data = await res.json();
         state.config = data;
         HCAPTCHA_SITE_KEY = data.hcaptchaSiteKey || HCAPTCHA_SITE_KEY;
-        // Cập nhật UI với config mới
-        updateUIFromConfig();
-        console.log('🔄 Config refreshed:', data);
+        lastAppliedConfigHash = generateConfigHash(data);
+        console.log('✅ Config loaded once:', data);
+        return data;
     } catch (error) {
-        console.warn('Failed to refresh config:', error);
+        console.warn('Failed to load config, using defaults:', error);
+        state.config = { 
+            points_per_ad: '10', 
+            points_per_xno: '500', 
+            referral_bonus: '5',
+            min_redeem_points: '50',
+            daily_limit: '100',
+            streak_bonus_multiplier: '2'
+        };
+        lastAppliedConfigHash = generateConfigHash(state.config);
+        return state.config;
     }
-}
-
-function startConfigPolling() {
-    if (configRefreshInterval) clearInterval(configRefreshInterval);
-    configRefreshInterval = setInterval(refreshConfig, 3000);
-    refreshConfig();
-    console.log('🔄 Config polling started (every 3s)');
-}
-
-function stopConfigPolling() {
-    if (configRefreshInterval) {
-        clearInterval(configRefreshInterval);
-        configRefreshInterval = null;
-        console.log('🔄 Config polling stopped');
-    }
-}
-
-// ============ VISIBILITY CHANGE HANDLER ============
-function setupVisibilityRefresh() {
-    document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible' && state.user) {
-            console.log('👁️ Tab visible, refreshing config...');
-            refreshConfig();
-        }
-    });
 }
 
 // ============ EVENTS ============
@@ -862,7 +911,8 @@ function attachEvents() {
             localStorage.setItem('refreshToken', data.refreshToken);
             state.user = data.user;
             await fetchPoints();
-            startConfigPolling();
+            // Start real-time config listener (SSE)
+            startConfigListener();
             resetCaptcha();
             showNotification('Welcome back! 🎉', 'success');
             render();
@@ -1081,25 +1131,22 @@ async function onAdCompleted() {
     }
 }
 
-// ============ REDEEM (FIXED) ============
+// ============ REDEEM ============
 async function redeem() {
     const pointsInput = document.getElementById('redeemPoints');
     const walletInput = document.getElementById('redeemWallet');
     const msg = document.getElementById('redeemMessage');
     const btn = document.getElementById('redeemBtn');
     
-    // Lấy config mới nhất từ state
     const pointsPerXNO = parseInt(state.config.points_per_xno) || 500;
     const minRedeem = parseInt(state.config.min_redeem_points) || 50;
     let points = parseInt(pointsInput.value) || 0;
 
-    // FIX: Kiểm tra nếu points < minRedeem thì set về minRedeem
     if (points < minRedeem) {
         points = minRedeem;
         pointsInput.value = minRedeem;
     }
 
-    // Validate
     if (state.points < minRedeem) {
         msg.textContent = `❌ Need at least ${minRedeem} points`;
         msg.className = 'action-message error';
@@ -1134,7 +1181,6 @@ async function redeem() {
         updateStats();
         updateRedeemButton();
         walletInput.value = '';
-        // Reset input value về min
         pointsInput.value = minRedeem;
     } catch (error) {
         msg.textContent = '❌ ' + (error.message || 'Failed to redeem');
@@ -1190,7 +1236,6 @@ function updateStats() {
     const levelText = document.querySelector('.hero-section .daily-progress ~ div span:first-child');
     if (levelText) levelText.textContent = `Level ${level} (${xp}/${nextLevelXp} XP)`;
     
-    // Update referral bonus text
     const referralBonus = parseInt(state.config.referral_bonus) || 5;
     const referralText = document.querySelector('.referral-section p strong');
     if (referralText) referralText.textContent = `${referralBonus} points`;
@@ -1214,7 +1259,7 @@ function clearLog() {
 }
 
 function logout() {
-    stopConfigPolling();
+    stopConfigListener();
     localStorage.removeItem('accessToken');
     localStorage.removeItem('refreshToken');
     state.user = null;
@@ -1225,28 +1270,6 @@ function logout() {
 function showError(msg) {
     const el = document.getElementById('error');
     if (el) { el.textContent = msg; el.className = 'auth-error show'; }
-}
-
-// ============ LOAD CONFIG (initial) ============
-async function loadConfig() {
-    try {
-        const res = await fetch(`${API_URL}/config`);
-        const data = await res.json();
-        state.config = data;
-        HCAPTCHA_SITE_KEY = data.hcaptchaSiteKey || HCAPTCHA_SITE_KEY;
-        return data;
-    } catch (error) {
-        console.warn('Failed to load config, using defaults:', error);
-        state.config = { 
-            points_per_ad: '10', 
-            points_per_xno: '500', 
-            referral_bonus: '5',
-            min_redeem_points: '50',
-            daily_limit: '100',
-            streak_bonus_multiplier: '2'
-        };
-        return state.config;
-    }
 }
 
 // ============ BOOT ============
@@ -1272,7 +1295,8 @@ async function init() {
                 await fetchPoints();
                 const streakRes = await api.get('/streak');
                 if (!streakRes.error) state.streak = streakRes.streak || 0;
-                startConfigPolling();
+                // Start real-time config listener (SSE)
+                startConfigListener();
             }
         } catch (error) {
             localStorage.removeItem('accessToken');
@@ -1280,10 +1304,9 @@ async function init() {
         }
     }
     render();
-    setupVisibilityRefresh();
 }
 
-// ============ EXPOSE GLOBALS (FIXED) ============
+// ============ EXPOSE GLOBALS ============
 window.state = state;
 window.render = render;
 window.watchAd = watchAd;
@@ -1293,13 +1316,12 @@ window.clearLog = clearLog;
 window.addLog = addLog;
 window.updateStats = updateStats;
 window.forgotPassword = forgotPassword;
-window.updateRedeemButton = updateRedeemButton; // FIXED: đúng tên
+window.updateRedeemButton = updateRedeemButton;
 window.toggleTheme = toggleTheme;
 window.copyReferral = copyReferral;
 window.claimDailyBonus = claimDailyBonus;
 window.showLeaderboard = showLeaderboard;
 window.renderDashboard = renderDashboard;
-window.refreshConfig = refreshConfig;
 
 document.addEventListener('DOMContentLoaded', init);
-console.log('🚀 XNO Rewards App Loaded - Config polling every 3s + visibility refresh');
+console.log('🚀 XNO Rewards App Loaded - Config via SSE (real-time, no polling)');
