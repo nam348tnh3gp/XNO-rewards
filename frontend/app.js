@@ -260,7 +260,7 @@ function updateWatchButton() {
     btn.innerHTML = `<i class="fas fa-play"></i> Watch Ad (+${ptsPerAd} pts)`;
 }
 
-// ============ UPDATE REDEEM BUTTON ============
+// ============ UPDATE REDEEM BUTTON (FIXED) ============
 function updateRedeemButton() {
     const btn = document.getElementById('redeemBtn');
     if (!btn) return;
@@ -313,7 +313,6 @@ function render() {
     attachEvents();
     updateRedeemButton();
     updateWatchButton();
-    // Cập nhật UI từ config hiện tại
     updateUIFromConfig();
 }
 
@@ -712,7 +711,7 @@ function renderDashboard() {
     `;
 }
 
-// ============ UPDATE UI FROM CONFIG ============
+// ============ UPDATE UI FROM CONFIG (FIXED) ============
 function updateUIFromConfig() {
     const pointsPerAd = parseInt(state.config.points_per_ad) || 10;
     const pointsPerXNO = parseInt(state.config.points_per_xno) || 500;
@@ -737,21 +736,22 @@ function updateUIFromConfig() {
     const ppxLabel = document.getElementById('pointsPerXnoLabel');
     if (ppxLabel) ppxLabel.textContent = pointsPerXNO;
 
-    // Redeem input
+    // Redeem input - FIXED: update min attribute and placeholder
     const redeemInput = document.getElementById('redeemPoints');
     if (redeemInput) {
         redeemInput.min = minRedeem;
+        redeemInput.placeholder = `Min ${minRedeem}`;
+        // Nếu giá trị hiện tại nhỏ hơn min, set về min
         if (parseInt(redeemInput.value) < minRedeem) {
             redeemInput.value = minRedeem;
         }
-        redeemInput.placeholder = `Min ${minRedeem}`;
     }
 
     // Referral bonus label
     const refLabel = document.getElementById('referralBonusLabel');
     if (refLabel) refLabel.textContent = referralBonus;
 
-    // Redeem button
+    // Redeem button - FIXED: gọi đúng tên
     updateRedeemButton();
 
     // Update stats that depend on config (XNO balance)
@@ -776,9 +776,7 @@ async function refreshConfig() {
 
 function startConfigPolling() {
     if (configRefreshInterval) clearInterval(configRefreshInterval);
-    // Poll mỗi 3 giây để phản hồi nhanh
     configRefreshInterval = setInterval(refreshConfig, 3000);
-    // Refresh ngay lập tức
     refreshConfig();
     console.log('🔄 Config polling started (every 3s)');
 }
@@ -864,7 +862,6 @@ function attachEvents() {
             localStorage.setItem('refreshToken', data.refreshToken);
             state.user = data.user;
             await fetchPoints();
-            // Bắt đầu polling config
             startConfigPolling();
             resetCaptcha();
             showNotification('Welcome back! 🎉', 'success');
@@ -1084,23 +1081,27 @@ async function onAdCompleted() {
     }
 }
 
-// ============ REDEEM ============
+// ============ REDEEM (FIXED) ============
 async function redeem() {
     const pointsInput = document.getElementById('redeemPoints');
     const walletInput = document.getElementById('redeemWallet');
     const msg = document.getElementById('redeemMessage');
     const btn = document.getElementById('redeemBtn');
+    
+    // Lấy config mới nhất từ state
     const pointsPerXNO = parseInt(state.config.points_per_xno) || 500;
     const minRedeem = parseInt(state.config.min_redeem_points) || 50;
-    const points = parseInt(pointsInput.value) || minRedeem;
+    let points = parseInt(pointsInput.value) || 0;
 
+    // FIX: Kiểm tra nếu points < minRedeem thì set về minRedeem
+    if (points < minRedeem) {
+        points = minRedeem;
+        pointsInput.value = minRedeem;
+    }
+
+    // Validate
     if (state.points < minRedeem) {
         msg.textContent = `❌ Need at least ${minRedeem} points`;
-        msg.className = 'action-message error';
-        return;
-    }
-    if (points < minRedeem) {
-        msg.textContent = `❌ Minimum ${minRedeem} points`;
         msg.className = 'action-message error';
         return;
     }
@@ -1133,6 +1134,8 @@ async function redeem() {
         updateStats();
         updateRedeemButton();
         walletInput.value = '';
+        // Reset input value về min
+        pointsInput.value = minRedeem;
     } catch (error) {
         msg.textContent = '❌ ' + (error.message || 'Failed to redeem');
         msg.className = 'action-message error';
@@ -1251,7 +1254,6 @@ async function init() {
     loadTheme();
     await loadConfig();
 
-    // Check reset password token
     const path = window.location.pathname;
     const match = path.match(/^\/reset-password\/([a-f0-9]{64})$/);
     if (match) {
@@ -1270,7 +1272,6 @@ async function init() {
                 await fetchPoints();
                 const streakRes = await api.get('/streak');
                 if (!streakRes.error) state.streak = streakRes.streak || 0;
-                // Bắt đầu polling config
                 startConfigPolling();
             }
         } catch (error) {
@@ -1279,11 +1280,10 @@ async function init() {
         }
     }
     render();
-    // Setup visibility change listener
     setupVisibilityRefresh();
 }
 
-// ============ EXPOSE GLOBALS ============
+// ============ EXPOSE GLOBALS (FIXED) ============
 window.state = state;
 window.render = render;
 window.watchAd = watchAd;
@@ -1293,13 +1293,13 @@ window.clearLog = clearLog;
 window.addLog = addLog;
 window.updateStats = updateStats;
 window.forgotPassword = forgotPassword;
-window.updateRedeemButton = updateRedeenButton;
+window.updateRedeemButton = updateRedeemButton; // FIXED: đúng tên
 window.toggleTheme = toggleTheme;
 window.copyReferral = copyReferral;
 window.claimDailyBonus = claimDailyBonus;
 window.showLeaderboard = showLeaderboard;
 window.renderDashboard = renderDashboard;
-window.refreshConfig = refreshConfig; // để debug
+window.refreshConfig = refreshConfig;
 
 document.addEventListener('DOMContentLoaded', init);
 console.log('🚀 XNO Rewards App Loaded - Config polling every 3s + visibility refresh');
