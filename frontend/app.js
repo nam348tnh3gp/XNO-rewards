@@ -248,7 +248,7 @@ function resetAdState(keepVisible = false) {
     updateAdStatus();
     const btn = document.getElementById('watchBtn');
     if (btn) {
-        const ptsPerAd = state.config.points_per_ad || 10;
+        const ptsPerAd = parseInt(state.config.points_per_ad) || 10;
         btn.disabled = false;
         btn.innerHTML = `<i class="fas fa-play"></i> Watch Ad (+${ptsPerAd} pts)`;
     }
@@ -258,7 +258,8 @@ function resetAdState(keepVisible = false) {
 function updateRedeemButton() {
     const btn = document.getElementById('redeemBtn');
     if (!btn) return;
-    const minPoints = Math.ceil((parseInt(state.config.points_per_xno) || 500) / 10);
+    const pointsPerXNO = parseInt(state.config.points_per_xno) || 500;
+    const minPoints = Math.ceil(pointsPerXNO / 10);
     if (state.points < minPoints) {
         btn.disabled = true;
         btn.textContent = `🔒 Need ${minPoints} pts`;
@@ -512,7 +513,8 @@ function renderDashboard() {
     const { user, points, stats, config } = state;
     const pointsPerAd = parseInt(config.points_per_ad) || 10;
     const pointsPerXNO = parseInt(config.points_per_xno) || 500;
-    const minRedeem = Math.ceil(pointsPerXNO / 10); // 10% của 1 XNO
+    const minRedeem = Math.ceil(pointsPerXNO / 10);
+    const referralBonus = parseInt(config.referral_bonus) || 5;
 
     const progress = Math.min((stats.dailyUsed / stats.dailyLimit * 100), 100);
     const xnoEarned = (stats.totalEarned / pointsPerXNO).toFixed(4);
@@ -665,7 +667,7 @@ function renderDashboard() {
                         </div>
                     </div>
                     <p style="font-size:13px;color:var(--text-secondary);margin-top:8px;">
-                        Share your referral link and earn <strong style="color:var(--success);">5 points</strong> for each friend who joins!
+                        Share your referral link and earn <strong style="color:var(--success);">${referralBonus} points</strong> for each friend who joins!
                     </p>
                 </div>
 
@@ -936,7 +938,7 @@ async function watchAd() {
         msg.textContent = '❌ ' + (error.message || 'Failed to watch ad');
         msg.className = 'action-message error';
         btn.disabled = false;
-        const ptsPerAd = state.config.points_per_ad || 10;
+        const ptsPerAd = parseInt(state.config.points_per_ad) || 10;
         btn.innerHTML = `<i class="fas fa-play"></i> Watch Ad (+${ptsPerAd} pts)`;
     }
 }
@@ -997,11 +999,6 @@ async function redeem() {
     }
     if (points < minRedeem) {
         msg.textContent = `❌ Minimum ${minRedeem} points`;
-        msg.className = 'action-message error';
-        return;
-    }
-    if (points % minRedeem !== 0) {
-        msg.textContent = `❌ Must be multiple of ${minRedeem}`;
         msg.className = 'action-message error';
         return;
     }
@@ -1087,6 +1084,11 @@ function updateStats() {
     if (levelProgress) levelProgress.style.width = Math.min((xp / nextLevelXp) * 100, 100) + '%';
     const levelText = document.querySelector('.hero-section .daily-progress ~ div span:first-child');
     if (levelText) levelText.textContent = `Level ${level} (${xp}/${nextLevelXp} XP)`;
+    
+    // Update referral bonus text
+    const referralBonus = parseInt(state.config.referral_bonus) || 5;
+    const referralText = document.querySelector('.referral-section p strong');
+    if (referralText) referralText.textContent = `${referralBonus} points`;
 }
 
 // ============ LOG ============
@@ -1129,7 +1131,7 @@ async function loadConfig() {
         return data;
     } catch (error) {
         console.warn('Failed to load config, using defaults:', error);
-        state.config = { points_per_ad: '10', points_per_xno: '500' };
+        state.config = { points_per_ad: '10', points_per_xno: '500', referral_bonus: '5' };
         return state.config;
     }
 }
@@ -1167,6 +1169,7 @@ async function init() {
     render();
 }
 
+// ============ EXPOSE GLOBALS ============
 window.state = state;
 window.render = render;
 window.watchAd = watchAd;
@@ -1181,6 +1184,7 @@ window.toggleTheme = toggleTheme;
 window.copyReferral = copyReferral;
 window.claimDailyBonus = claimDailyBonus;
 window.showLeaderboard = showLeaderboard;
+window.renderDashboard = renderDashboard;
 
 document.addEventListener('DOMContentLoaded', init);
 console.log('🚀 XNO Rewards App Loaded');
