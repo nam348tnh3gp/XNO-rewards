@@ -10,11 +10,15 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const axios = require('axios');
+const cookieParser = require('cookie-parser');
 require('dotenv').config();
 
 // ============ CONFIG ============
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+// ============ ADMIN CONFIG FROM ENV ============
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@example.com';
 
 // ============ GLOBAL ERROR HANDLERS ============
 process.on('uncaughtException', (error) => {
@@ -153,10 +157,22 @@ try {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS config (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE TRIGGER IF NOT EXISTS update_users_updated_at
       AFTER UPDATE ON users
       BEGIN
         UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS update_config_updated_at
+      AFTER UPDATE ON config
+      BEGIN
+        UPDATE config SET updated_at = CURRENT_TIMESTAMP WHERE key = NEW.key;
       END;
     `);
     console.log('✅ Database schema created successfully');
@@ -169,7 +185,7 @@ try {
     process.exit(1);
 }
 
-// ============ FIX: Thêm cột reference_id nếu chưa có ============
+// ============ FIX: Thêm cột nếu chưa có ============
 try {
     db.exec('ALTER TABLE point_transactions ADD COLUMN reference_id TEXT');
     console.log('✅ Added reference_id column to point_transactions');
@@ -177,7 +193,6 @@ try {
     console.log('ℹ️ reference_id column already exists');
 }
 
-// ============ FIX: Thêm cột expires_at nếu chưa có ============
 try {
     db.exec('ALTER TABLE ad_watch_history ADD COLUMN expires_at DATETIME');
     console.log('✅ Added expires_at column to ad_watch_history');
@@ -185,7 +200,6 @@ try {
     console.log('ℹ️ expires_at column already exists');
 }
 
-// ============ FIX: Thêm cột referred_by nếu chưa có ============
 try {
     db.exec('ALTER TABLE users ADD COLUMN referred_by INTEGER REFERENCES users(id)');
     console.log('✅ Added referred_by column to users');
@@ -193,7 +207,7 @@ try {
     console.log('ℹ️ referred_by column already exists');
 }
 
-// Tạo index an toàn
+// ============ TẠO INDEX ============
 const createIndex = (sql) => {
     try {
         db.exec(sql);
@@ -214,6 +228,69 @@ createIndex('CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(
 createIndex('CREATE INDEX IF NOT EXISTS idx_tokens_user ON notification_tokens(user_id)');
 createIndex('CREATE INDEX IF NOT EXISTS idx_password_resets_token ON password_resets(token)');
 console.log('✅ Database indexes created');
+
+// ============ CONFIG HELPER ============
+const DEFAULT_CONFIG = {
+    points_per_ad: '10',
+    points_per_xno: '500',
+    daily_limit: '100',
+    min_redeem_points: '50',
+    streak_bonus_multiplier: '2',
+    referral_bonus: '5'
+};
+
+function getConfigValue(key) {
+    try {
+        const row = db.prepare('SELECT value FROM config WHERE key = ?').get(key);
+        if (row) return row.value;
+        const defaultValue = DEFAULT_CONFIG[key];
+        if (defaultValue !== undefined) {
+            db.prepare('INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)').run(key, defaultValue);
+            return defaultValue;
+        }
+        return null;
+    } catch (error) {
+        console.error('❌ getConfigValue error:', error.message);
+        return DEFAULT_CONFIG[key] || null;
+    }
+}
+
+function setConfigValue(key, value) {
+    try {
+        const stmt = db.prepare('INSERT OR REPLACE INTO config (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)');
+        stmt.run(key, String(value));
+        console.log(`✅ Config updated: ${key} = ${value}`);
+        return true;
+    } catch (error) {
+        console.error('❌ setConfigValue error:', error.message);
+        return false;
+    }
+}
+
+// Khởi tạo config mặc định
+Object.keys(DEFAULT_CONFIG).forEach(key => {
+    const existing = db.prepare('SELECT value FROM config WHERE key = ?').get(key);
+    if (!existing) {
+        setConfigValue(key, DEFAULT_CONFIG[key]);
+    }
+});
+
+function getAllConfig() {
+    try {
+        const rows = db.prepare('SELECT key, value FROM config').all();
+        const config = {};
+        rows.forEach(row => { config[row.key] = row.value; });
+        Object.keys(DEFAULT_CONFIG).forEach(key => {
+            if (!(key in config)) {
+                config[key] = DEFAULT_CONFIG[key];
+            }
+        });
+        return config;
+    } catch (error) {
+        console.error('❌ getAllConfig error:', error.message);
+        return DEFAULT_CONFIG;
+    }
+}
 
 // ============ HELPERS ============
 const hashPassword = (password) => {
@@ -391,6 +468,8 @@ const verifyHCaptcha = async (token) => {
 // ============ MIDDLEWARE ============
 app.set('trust proxy', true);
 
+app.use(cookieParser());
+
 app.use(helmet({
     contentSecurityPolicy: false
 }));
@@ -459,13 +538,65 @@ const admin = (req, res, next) => {
     next();
 };
 
+const adminAuthWeb = (req, res, next) => {
+    const token = req.cookies?.adminToken;
+    if (!token) {
+        return res.redirect('/admin/login');
+    }
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const user = db.prepare('SELECT id, username, email, role, points, is_verified, wallet_address, referred_by FROM users WHERE id = ?').get(decoded.userId);
+        if (!user || user.role !== 'admin') {
+            return res.redirect('/admin/login');
+        }
+        req.user = user;
+        req.token = token;
+        next();
+    } catch (error) {
+        return res.redirect('/admin/login');
+    }
+};
+
 // ============ API ROUTES ============
 
-// -------- CONFIG (public) --------
 app.get('/api/config', (req, res) => {
+    const config = getAllConfig();
     res.json({
-        hcaptchaSiteKey: process.env.HCAPTCHA_SITE_KEY || '5aa632cc-e278-444e-90aa-59aa63e00a36'
+        ...config,
+        hcaptchaSiteKey: process.env.HCAPTCHA_SITE_KEY || '5aa632cc-e278-444e-90aa-59aa63e00a36',
+        adminEmail: ADMIN_EMAIL
     });
+});
+
+app.put('/api/admin/config', auth, admin, (req, res) => {
+    try {
+        const { key, value } = req.body;
+        if (!key || value === undefined) {
+            return res.status(400).json({ error: 'key and value are required' });
+        }
+        const allowedKeys = Object.keys(DEFAULT_CONFIG);
+        if (!allowedKeys.includes(key)) {
+            return res.status(400).json({ error: 'Invalid config key' });
+        }
+        const numericValue = parseFloat(value);
+        if (isNaN(numericValue) || numericValue <= 0) {
+            return res.status(400).json({ error: 'Value must be a positive number' });
+        }
+        if (setConfigValue(key, numericValue)) {
+            const newConfig = getAllConfig();
+            res.json({ 
+                success: true, 
+                message: `Config ${key} updated to ${numericValue}`,
+                config: newConfig
+            });
+        } else {
+            res.status(500).json({ error: 'Failed to update config' });
+        }
+    } catch (error) {
+        console.error('❌ Update config error:', error.message);
+        res.status(500).json({ error: 'Failed to update config' });
+    }
 });
 
 // -------- AUTH --------
@@ -560,22 +691,37 @@ app.post('/api/auth/register', async (req, res) => {
         }
 
         const passwordHash = hashPassword(password);
+        
+        const isAdmin = email.toLowerCase() === ADMIN_EMAIL.toLowerCase();
+        const role = isAdmin ? 'admin' : 'user';
+        
+        if (isAdmin) {
+            console.log(`👑 Admin account registration: ${email}`);
+        }
+
         const stmt = db.prepare(`
-            INSERT INTO users (username, email, password_hash, wallet_address, is_verified)
-            VALUES (?, ?, ?, ?, 1)
+            INSERT INTO users (username, email, password_hash, wallet_address, is_verified, role)
+            VALUES (?, ?, ?, ?, 1, ?)
         `);
-        const info = stmt.run(username, email, passwordHash, walletAddress || null);
+        const info = stmt.run(username, email, passwordHash, walletAddress || null, role);
 
         db.prepare('DELETE FROM email_verifications WHERE email = ?').run(email);
 
+        const welcomeMessage = isAdmin 
+            ? 'Welcome Admin! You have full access to the dashboard.' 
+            : 'Start earning points by watching ads.';
+
         db.prepare(`
             INSERT INTO notifications (user_id, title, message, type)
-            VALUES (?, 'Welcome to XNO Rewards! 🎉', 'Start earning points by watching ads. 50 points = 0.1 XNO!', 'success')
-        `).run(info.lastInsertRowid);
+            VALUES (?, 'Welcome to XNO Rewards! 🎉', ?, 'success')
+        `).run(info.lastInsertRowid, welcomeMessage);
 
         res.status(201).json({
-            message: 'Registration successful! You can now login.',
-            userId: info.lastInsertRowid
+            message: isAdmin 
+                ? 'Admin account created successfully! You can now login to admin dashboard.' 
+                : 'Registration successful! You can now login.',
+            userId: info.lastInsertRowid,
+            role: role
         });
     } catch (error) {
         console.error('❌ Register error:', {
@@ -594,7 +740,7 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(400).json({ error: 'Email and password required' });
         }
 
-        if (process.env.HCAPTCHA_SECRET) {
+        if (process.env.HCAPTCHA_SECRET && hcaptchaToken) {
             const isValid = await verifyHCaptcha(hcaptchaToken);
             if (!isValid) {
                 return res.status(400).json({ error: 'hCaptcha verification failed' });
@@ -717,7 +863,6 @@ app.post('/api/auth/forgot-password', async (req, res) => {
             return res.status(404).json({ error: 'Email not found' });
         }
 
-        // Xóa token cũ
         db.prepare('DELETE FROM password_resets WHERE user_id = ?').run(user.id);
 
         const token = crypto.randomBytes(32).toString('hex');
@@ -795,13 +940,15 @@ app.get('/api/points', auth, (req, res) => {
             WHERE user_id = ? AND type = 'watch_ad' AND date(created_at) = date('now')
         `).get(req.user.id);
 
+        const dailyLimit = parseInt(getConfigValue('daily_limit')) || 100;
+
         res.json({
             points: user.points,
             stats: {
                 totalWatched: stats.total_watched || 0,
                 totalEarned: stats.total_earned || 0,
                 totalSpent: stats.total_spent || 0,
-                dailyLimit: 100,
+                dailyLimit: dailyLimit,
                 dailyUsed: today.today_points || 0
             }
         });
@@ -811,7 +958,7 @@ app.get('/api/points', auth, (req, res) => {
     }
 });
 
-// -------- AD VERIFICATION (A-Ads) --------
+// -------- AD VERIFICATION --------
 app.post('/api/ad/start', auth, (req, res) => {
     try {
         const now = new Date().toISOString();
@@ -846,8 +993,6 @@ app.post('/api/ad/start', auth, (req, res) => {
 app.post('/api/ad/verify', auth, (req, res) => {
     try {
         const { sessionId, watchDuration, adId } = req.body;
-
-        console.log('🔍 Ad verify request:', { sessionId, watchDuration, adId, userId: req.user.id });
 
         if (!sessionId) {
             return res.status(400).json({ error: 'Session ID required' });
@@ -897,8 +1042,6 @@ app.post('/api/ad/verify', auth, (req, res) => {
             return res.status(400).json({ error: 'Watch duration too long' });
         }
 
-        // Bỏ kiểm tra IP để hỗ trợ tunnel
-
         let today;
         try {
             today = db.prepare(`
@@ -910,8 +1053,11 @@ app.post('/api/ad/verify', auth, (req, res) => {
             return res.status(500).json({ error: 'Database error' });
         }
 
-        if ((today.today_points || 0) + 10 > 100) {
-            return res.status(429).json({ error: 'Daily limit reached (100 points/day)' });
+        const pointsPerAd = parseInt(getConfigValue('points_per_ad')) || 10;
+        const dailyLimit = parseInt(getConfigValue('daily_limit')) || 100;
+
+        if ((today.today_points || 0) + pointsPerAd > dailyLimit) {
+            return res.status(429).json({ error: `Daily limit reached (${dailyLimit} points/day)` });
         }
 
         let existing;
@@ -941,14 +1087,14 @@ app.post('/api/ad/verify', auth, (req, res) => {
         }
 
         try {
-            db.prepare('UPDATE users SET points = points + 10 WHERE id = ?').run(req.user.id);
+            db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(pointsPerAd, req.user.id);
 
             db.prepare(`
                 INSERT INTO point_transactions (user_id, amount, type, source, reference_id)
-                VALUES (?, 10, 'watch_ad', 'aads', ?)
-            `).run(req.user.id, sessionId);
+                VALUES (?, ?, 'watch_ad', 'aads', ?)
+            `).run(req.user.id, pointsPerAd, sessionId);
 
-            console.log('✅ Points added successfully for user:', req.user.id);
+            console.log(`✅ ${pointsPerAd} points added successfully for user:`, req.user.id);
         } catch (error) {
             console.error('❌ Points update error:', {
                 message: error.message,
@@ -962,7 +1108,7 @@ app.post('/api/ad/verify', auth, (req, res) => {
 
         res.json({
             success: true,
-            pointsAdded: 10,
+            pointsAdded: pointsPerAd,
             newTotal: user.points,
             verified: true
         });
@@ -977,21 +1123,24 @@ app.post('/api/ad/verify', auth, (req, res) => {
     }
 });
 
-// -------- REDEEM --------
+// -------- REDEEM (linh hoạt) --------
 app.post('/api/redeem', auth, async (req, res) => {
     try {
         const { points, walletAddress } = req.body;
-        const pointsToRedeem = parseInt(points) || 50;
+        const pointsToRedeem = parseInt(points) || 0;
         const targetWallet = walletAddress || req.user.wallet_address;
 
         if (!targetWallet) {
             return res.status(400).json({ error: 'Wallet address required' });
         }
-        if (pointsToRedeem < 50) {
-            return res.status(400).json({ error: 'Minimum redeem is 50 points' });
-        }
-        if (pointsToRedeem % 50 !== 0) {
-            return res.status(400).json({ error: 'Points must be multiple of 50' });
+
+        const pointsPerXNO = parseFloat(getConfigValue('points_per_xno')) || 500;
+        const minRedeemPoints = parseInt(getConfigValue('min_redeem_points')) || 50;
+
+        if (pointsToRedeem < minRedeemPoints) {
+            return res.status(400).json({ 
+                error: `Minimum redeem is ${minRedeemPoints} points (${(minRedeemPoints / pointsPerXNO).toFixed(6)} XNO)` 
+            });
         }
 
         const user = db.prepare('SELECT points FROM users WHERE id = ?').get(req.user.id);
@@ -999,7 +1148,7 @@ app.post('/api/redeem', auth, async (req, res) => {
             return res.status(400).json({ error: 'Insufficient points' });
         }
 
-        const xnoAmount = (pointsToRedeem / 50) * 0.1;
+        const xnoAmount = pointsToRedeem / pointsPerXNO;
 
         db.prepare('UPDATE users SET points = points - ? WHERE id = ?').run(pointsToRedeem, req.user.id);
 
@@ -1020,7 +1169,7 @@ app.post('/api/redeem', auth, async (req, res) => {
 
         db.prepare(`
             INSERT INTO notifications (user_id, title, message, type)
-            VALUES (?, 'Redeem Successful! 🎉', 'You redeemed ${pointsToRedeem} points for ${xnoAmount} XNO', 'success')
+            VALUES (?, 'Redeem Successful! 🎉', 'You redeemed ${pointsToRedeem} points for ${xnoAmount.toFixed(6)} XNO', 'success')
         `).run(req.user.id);
 
         res.json({
@@ -1029,7 +1178,7 @@ app.post('/api/redeem', auth, async (req, res) => {
             xnoAmount: xnoAmount,
             walletAddress: targetWallet,
             txHash: txHash,
-            message: `Successfully redeemed ${pointsToRedeem} points for ${xnoAmount} XNO`
+            message: `Successfully redeemed ${pointsToRedeem} points for ${xnoAmount.toFixed(6)} XNO`
         });
     } catch (error) {
         console.error('❌ Redeem error:', {
@@ -1184,11 +1333,13 @@ app.post('/api/referral/claim', auth, (req, res) => {
             return res.status(400).json({ error: 'Already claimed this referral' });
         }
         
-        db.prepare('UPDATE users SET points = points + 5 WHERE id = ?').run(req.user.id);
+        const referralBonus = parseInt(getConfigValue('referral_bonus')) || 5;
+        
+        db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(referralBonus, req.user.id);
         db.prepare(`
             INSERT INTO point_transactions (user_id, amount, type, source)
-            VALUES (?, 5, 'referral_bonus', ?)
-        `).run(req.user.id, referralCode);
+            VALUES (?, ?, 'referral_bonus', ?)
+        `).run(req.user.id, referralBonus, referralCode);
         
         const user = db.prepare('SELECT referred_by FROM users WHERE id = ?').get(referred.id);
         if (!user.referred_by) {
@@ -1198,9 +1349,9 @@ app.post('/api/referral/claim', auth, (req, res) => {
         const newPoints = db.prepare('SELECT points FROM users WHERE id = ?').get(req.user.id);
         res.json({
             success: true,
-            bonus: 5,
+            bonus: referralBonus,
             newTotal: newPoints.points,
-            message: '🎉 Referral bonus claimed! +5 points'
+            message: `🎉 Referral bonus claimed! +${referralBonus} points`
         });
     } catch (error) {
         console.error('❌ Claim referral error:', error.message);
@@ -1245,6 +1396,7 @@ app.post('/api/daily-bonus', auth, (req, res) => {
             WHERE user_id = ? AND type = 'daily_bonus' AND date(created_at) = date('now', '-1 day')
         `).get(req.user.id);
         
+        const streakMultiplier = parseInt(getConfigValue('streak_bonus_multiplier')) || 2;
         let bonus = 5;
         let streak = 0;
         
@@ -1255,7 +1407,7 @@ app.post('/api/daily-bonus', auth, (req, res) => {
                 AND date(created_at) >= date('now', '-30 day')
             `).get(req.user.id);
             streak = (streakData.streak || 0) + 1;
-            bonus = Math.min(5 + streak * 2, 50);
+            bonus = Math.min(5 + streak * streakMultiplier, 50);
         }
         
         db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(bonus, req.user.id);
@@ -1363,19 +1515,22 @@ app.get('/api/check-email/:email', (req, res) => {
     }
 });
 
-// -------- ADMIN --------
+// ============ ADMIN API ============
 app.get('/api/admin/stats', auth, admin, (req, res) => {
     try {
         const totalUsers = db.prepare('SELECT COUNT(*) as count FROM users').get();
         const totalPoints = db.prepare('SELECT SUM(points) as total FROM users').get();
-        const totalXNO = db.prepare('SELECT SUM(amount_xno) as total FROM xno_transactions WHERE status = "completed"').get();
-        const totalAds = db.prepare('SELECT COUNT(*) as count FROM point_transactions WHERE type = "watch_ad"').get();
+        // FIX: Dùng dấu nháy đơn cho chuỗi 'completed'
+        const totalXNO = db.prepare('SELECT SUM(amount_xno) as total FROM xno_transactions WHERE status = ?').get('completed');
+        const totalAds = db.prepare('SELECT COUNT(*) as count FROM point_transactions WHERE type = ?').get('watch_ad');
+        const totalRedeemed = db.prepare('SELECT SUM(-amount) as total FROM point_transactions WHERE type = ?').get('redeem');
 
         res.json({
             users: totalUsers.count || 0,
             points: totalPoints.total || 0,
             xno: totalXNO.total || 0,
-            ads: totalAds.count || 0
+            ads: totalAds.count || 0,
+            redeemed: totalRedeemed.total || 0
         });
     } catch (error) {
         console.error('❌ Admin stats error:', error.message);
@@ -1400,16 +1555,23 @@ app.get('/api/admin/suspicious', auth, admin, (req, res) => {
     try {
         const suspicious = db.prepare(`
             SELECT
-                a.*,
+                a.id,
+                a.user_id,
+                a.session_id,
+                a.status,
+                a.started_at as created_at,
+                a.completed_at,
+                a.verified_at,
+                a.ip_address,
                 u.username,
                 u.email,
                 u.points
             FROM ad_watch_history a
             JOIN users u ON a.user_id = u.id
-            WHERE a.status = 'suspicious'
-            ORDER BY a.created_at DESC
+            WHERE a.status = ?
+            ORDER BY a.started_at DESC
             LIMIT 100
-        `).all();
+        `).all('suspicious');
         res.json({ suspicious });
     } catch (error) {
         console.error('❌ Admin suspicious error:', error.message);
@@ -1431,6 +1593,594 @@ app.post('/api/admin/ban/:userId', auth, admin, (req, res) => {
         console.error('❌ Ban user error:', error.message);
         res.status(500).json({ error: 'Failed to ban user' });
     }
+});
+
+// ============ ADMIN WEB ROUTES ============
+
+app.get('/admin/login', (req, res) => {
+    const token = req.cookies?.adminToken;
+    if (token) {
+        try {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+            const user = db.prepare('SELECT role FROM users WHERE id = ?').get(decoded.userId);
+            if (user && user.role === 'admin') {
+                return res.redirect('/admin');
+            }
+        } catch (e) {}
+    }
+
+    res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Admin Login - XNO Rewards</title>
+            <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+            <style>
+                * { margin:0; padding:0; box-sizing:border-box; }
+                body {
+                    font-family: 'Inter', sans-serif;
+                    background: #0A0A0F;
+                    color: #F5F5FF;
+                    min-height: 100vh;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 20px;
+                }
+                .container {
+                    background: #1A1A2E;
+                    padding: 48px 40px;
+                    border-radius: 28px;
+                    max-width: 420px;
+                    width: 100%;
+                    border: 1px solid rgba(255,255,255,0.08);
+                    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+                }
+                h1 {
+                    font-size: 28px;
+                    font-weight: 800;
+                    background: linear-gradient(135deg, #0A84FF, #7C3AED);
+                    -webkit-background-clip: text;
+                    background-clip: text;
+                    color: transparent;
+                    text-align: center;
+                    margin-bottom: 8px;
+                }
+                p.sub {
+                    color: #A0A0B8;
+                    text-align: center;
+                    font-size: 14px;
+                    margin-bottom: 24px;
+                }
+                .form-group {
+                    margin-bottom: 16px;
+                }
+                label {
+                    display: block;
+                    font-size: 13px;
+                    font-weight: 600;
+                    color: #A0A0B8;
+                    margin-bottom: 6px;
+                }
+                input {
+                    width: 100%;
+                    padding: 12px 16px;
+                    border: 2px solid rgba(255,255,255,0.08);
+                    border-radius: 12px;
+                    font-size: 15px;
+                    background: #1E1E32;
+                    color: #F5F5FF;
+                    font-family: 'Inter', sans-serif;
+                    transition: all 0.3s;
+                }
+                input:focus {
+                    outline: none;
+                    border-color: #0A84FF;
+                    box-shadow: 0 0 0 4px rgba(10,132,255,0.1);
+                }
+                .btn {
+                    width: 100%;
+                    padding: 14px;
+                    background: linear-gradient(135deg, #0A84FF, #7C3AED);
+                    color: #fff;
+                    border: none;
+                    border-radius: 12px;
+                    font-size: 16px;
+                    font-weight: 700;
+                    cursor: pointer;
+                    transition: all 0.3s;
+                    font-family: 'Inter', sans-serif;
+                }
+                .btn:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(10,132,255,0.3); }
+                .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+                .error {
+                    background: rgba(255,55,95,0.1);
+                    border: 1px solid rgba(255,55,95,0.2);
+                    color: #FF375F;
+                    padding: 12px 16px;
+                    border-radius: 12px;
+                    font-size: 14px;
+                    margin-bottom: 16px;
+                    display: none;
+                }
+                .spinner {
+                    display: inline-block;
+                    width: 20px;
+                    height: 20px;
+                    border: 2.5px solid rgba(255,255,255,0.2);
+                    border-radius: 50%;
+                    border-top-color: #fff;
+                    animation: spin 0.7s linear infinite;
+                    vertical-align: middle;
+                }
+                @keyframes spin { to { transform: rotate(360deg); } }
+                .back-link {
+                    text-align: center;
+                    margin-top: 16px;
+                    font-size: 14px;
+                    color: #A0A0B8;
+                }
+                .back-link a { color: #0A84FF; text-decoration: none; font-weight: 600; }
+                .back-link a:hover { text-decoration: underline; }
+                .alert-info {
+                    background: rgba(10,132,255,0.1);
+                    border: 1px solid rgba(10,132,255,0.2);
+                    color: #0A84FF;
+                    padding: 12px 16px;
+                    border-radius: 12px;
+                    font-size: 14px;
+                    margin-bottom: 16px;
+                }
+                .admin-hint {
+                    text-align: center;
+                    margin-top: 12px;
+                    font-size: 12px;
+                    color: #6B7280;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🛡️ Admin Login</h1>
+                <p class="sub">Enter your admin credentials</p>
+                ${req.query.logout ? '<div class="alert-info">✅ You have been logged out.</div>' : ''}
+                <div id="error" class="error"></div>
+                <form id="loginForm">
+                    <div class="form-group">
+                        <label>Email</label>
+                        <input type="email" id="email" placeholder="admin@example.com" required autofocus>
+                    </div>
+                    <div class="form-group">
+                        <label>Password</label>
+                        <input type="password" id="password" placeholder="••••••••" required>
+                    </div>
+                    <button type="submit" class="btn" id="loginBtn">Sign In</button>
+                </form>
+                <div class="admin-hint">
+                    💡 Admin email được cấu hình trong .env: <strong>${ADMIN_EMAIL}</strong>
+                </div>
+                <div class="back-link">
+                    <a href="/">← Back to main site</a>
+                </div>
+            </div>
+            <script>
+                const form = document.getElementById('loginForm');
+                const errorEl = document.getElementById('error');
+                const btn = document.getElementById('loginBtn');
+
+                form.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const email = document.getElementById('email').value;
+                    const password = document.getElementById('password').value;
+
+                    errorEl.style.display = 'none';
+                    btn.disabled = true;
+                    btn.innerHTML = '<span class="spinner"></span>';
+
+                    try {
+                        const res = await fetch('/admin/login', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ email, password })
+                        });
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.error || 'Login failed');
+
+                        window.location.href = '/admin';
+                    } catch (err) {
+                        errorEl.textContent = err.message || 'Something went wrong.';
+                        errorEl.style.display = 'block';
+                    } finally {
+                        btn.disabled = false;
+                        btn.textContent = 'Sign In';
+                    }
+                });
+            </script>
+        </body>
+        </html>
+    `);
+});
+
+app.post('/admin/login', express.json(), async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        if (!email || !password) {
+            return res.status(400).json({ error: 'Email and password required' });
+        }
+
+        const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+        if (!user || !verifyPassword(password, user.password_hash)) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+        
+        if (user.role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+
+        const token = generateToken(user.id);
+
+        res.cookie('adminToken', token, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'lax',
+            maxAge: 7 * 24 * 60 * 60 * 1000
+        });
+
+        res.json({ success: true, redirect: '/admin' });
+    } catch (error) {
+        console.error('❌ Admin login error:', error.message);
+        res.status(500).json({ error: 'Admin login failed' });
+    }
+});
+
+app.get('/admin/logout', (req, res) => {
+    res.clearCookie('adminToken');
+    res.redirect('/admin/login?logout=1');
+});
+
+app.get('/admin', adminAuthWeb, (req, res) => {
+    const token = req.token;
+    
+    res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Admin Dashboard - XNO Rewards</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { 
+                    font-family: 'Inter', -apple-system, sans-serif; 
+                    padding: 20px; 
+                    background: #f4f4f5; 
+                }
+                .container { max-width: 1200px; margin: 0 auto; }
+                .card { 
+                    background: white; 
+                    padding: 20px; 
+                    border-radius: 12px; 
+                    margin-bottom: 20px; 
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
+                }
+                table { width: 100%; border-collapse: collapse; }
+                th, td { 
+                    padding: 8px 12px; 
+                    text-align: left; 
+                    border-bottom: 1px solid #e4e4e7; 
+                }
+                th { background: #f8f8fa; font-weight: 600; }
+                .suspicious { background: #fef2f2; }
+                .badge { 
+                    padding: 4px 8px; 
+                    border-radius: 9999px; 
+                    font-size: 12px; 
+                    display: inline-block; 
+                }
+                .badge-danger { background: #fee2e2; color: #dc2626; }
+                .badge-success { background: #dcfce7; color: #16a34a; }
+                .badge-warning { background: #fef3c7; color: #d97706; }
+                .btn-ban { 
+                    background: #dc2626; 
+                    color: white; 
+                    border: none; 
+                    padding: 4px 12px; 
+                    border-radius: 6px; 
+                    cursor: pointer; 
+                    font-size: 12px; 
+                }
+                .btn-ban:hover { background: #b91c1c; }
+                .stats-grid { 
+                    display: grid; 
+                    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); 
+                    gap: 16px; 
+                }
+                .stat { 
+                    padding: 16px; 
+                    background: white; 
+                    border-radius: 8px; 
+                    text-align: center; 
+                }
+                .stat-value { font-size: 32px; font-weight: 700; }
+                .stat-label { font-size: 14px; color: #6b7280; }
+                h1 { margin-bottom: 20px; }
+                .header { 
+                    display: flex; 
+                    justify-content: space-between; 
+                    align-items: center; 
+                    margin-bottom: 20px; 
+                }
+                .btn-logout { 
+                    background: #6b7280; 
+                    color: white; 
+                    border: none; 
+                    padding: 8px 16px; 
+                    border-radius: 6px; 
+                    cursor: pointer; 
+                    font-family: 'Inter', sans-serif;
+                    font-weight: 600;
+                }
+                .btn-logout:hover { background: #4b5563; }
+                .config-section { 
+                    margin-top: 16px; 
+                    padding: 16px; 
+                    background: #f0f4ff; 
+                    border-radius: 8px; 
+                }
+                .config-row { 
+                    display: flex; 
+                    align-items: center; 
+                    gap: 12px; 
+                    flex-wrap: wrap; 
+                    margin-bottom: 8px; 
+                }
+                .config-row label { 
+                    font-weight: 600; 
+                    min-width: 160px; 
+                    font-size: 13px;
+                }
+                .config-row input { 
+                    padding: 6px 12px; 
+                    border: 1px solid #ccc; 
+                    border-radius: 6px; 
+                    width: 140px; 
+                    font-family: 'Inter', sans-serif;
+                }
+                .config-row button { 
+                    background: #0A84FF; 
+                    color: white; 
+                    border: none; 
+                    padding: 6px 16px; 
+                    border-radius: 6px; 
+                    cursor: pointer; 
+                    font-family: 'Inter', sans-serif;
+                    font-weight: 600;
+                }
+                .config-row button:hover { background: #006EDC; }
+                .config-row .current-value {
+                    font-size: 13px;
+                    color: #6b7280;
+                    margin-left: 4px;
+                }
+                .admin-user {
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    color: #374151;
+                    font-weight: 600;
+                }
+                .admin-user .avatar {
+                    width: 32px;
+                    height: 32px;
+                    border-radius: 50%;
+                    background: linear-gradient(135deg, #0A84FF, #7C3AED);
+                    color: white;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    font-weight: 700;
+                    font-size: 14px;
+                }
+                .config-description {
+                    font-size: 12px;
+                    color: #6b7280;
+                    margin-left: 12px;
+                }
+                @media (max-width: 600px) {
+                    .stats-grid { grid-template-columns: 1fr 1fr; }
+                    table { font-size: 12px; }
+                    th, td { padding: 4px 6px; }
+                    .config-row { flex-direction: column; align-items: stretch; }
+                    .config-row label { min-width: auto; }
+                    .config-row input { width: 100%; }
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <div style="display:flex;align-items:center;gap:16px;">
+                        <h1>🛡️ Admin Dashboard</h1>
+                        <span class="admin-user">
+                            <span class="avatar">${req.user.username.charAt(0).toUpperCase()}</span>
+                            ${req.user.username}
+                        </span>
+                    </div>
+                    <button class="btn-logout" onclick="logout()">Logout</button>
+                </div>
+                <div id="stats" class="card"></div>
+                <div id="suspicious" class="card"></div>
+                <div id="config" class="card">
+                    <h3>⚙️ System Config</h3>
+                    <div id="configForm" class="config-section"></div>
+                </div>
+            </div>
+            <script>
+                const API_URL = window.location.origin + '/api';
+                const adminToken = '${token}';
+
+                const CONFIG_DESCRIPTIONS = {
+                    points_per_ad: 'Points earned per ad watched',
+                    points_per_xno: 'Points needed to redeem 1 XNO',
+                    daily_limit: 'Maximum points can earn per day',
+                    min_redeem_points: 'Minimum points to redeem',
+                    streak_bonus_multiplier: 'Bonus points per streak day',
+                    referral_bonus: 'Points rewarded for each referral'
+                };
+
+                async function fetchWithAuth(url) {
+                    const res = await fetch(url, {
+                        headers: { 'Authorization': 'Bearer ' + adminToken }
+                    });
+                    if (!res.ok) {
+                        if (res.status === 401 || res.status === 403) {
+                            window.location.href = '/admin/login';
+                            return null;
+                        }
+                        const errorData = await res.json().catch(() => ({}));
+                        throw new Error(errorData.error || 'HTTP ' + res.status);
+                    }
+                    return res.json();
+                }
+
+                async function loadStats() {
+                    try {
+                        const data = await fetchWithAuth(API_URL + '/admin/stats');
+                        if (!data) return;
+                        document.getElementById('stats').innerHTML = \`
+                            <div class="stats-grid">
+                                <div class="stat"><div class="stat-value">\${data.users}</div><div class="stat-label">Total Users</div></div>
+                                <div class="stat"><div class="stat-value">\${data.points}</div><div class="stat-label">Total Points</div></div>
+                                <div class="stat"><div class="stat-value">\${data.redeemed || 0}</div><div class="stat-label">Points Redeemed</div></div>
+                                <div class="stat"><div class="stat-value">\${data.xno || 0}</div><div class="stat-label">XNO Distributed</div></div>
+                                <div class="stat"><div class="stat-value">\${data.ads}</div><div class="stat-label">Ads Watched</div></div>
+                            </div>
+                        \`;
+                    } catch (e) {
+                        console.error('Failed to load stats:', e);
+                        document.getElementById('stats').innerHTML = '<p style="color:red;">❌ Failed to load stats: ' + e.message + '</p>';
+                    }
+                }
+
+                async function loadSuspicious() {
+                    try {
+                        const data = await fetchWithAuth(API_URL + '/admin/suspicious');
+                        if (!data) return;
+                        let html = '<h3>🚨 Suspicious Activities</h3>';
+                        if (data.suspicious.length === 0) {
+                            html += '<p>✅ No suspicious activities found.</p>';
+                        } else {
+                            html += '<div style="overflow-x:auto;"><table><thead><tr><th>User</th><th>Email</th><th>Status</th><th>Time</th><th>Action</th></tr></thead><tbody>';
+                            data.suspicious.forEach(s => {
+                                html += \`
+                                    <tr class="suspicious">
+                                        <td>\${s.username}</td>
+                                        <td>\${s.email}</td>
+                                        <td><span class="badge badge-danger">\${s.status}</span></td>
+                                        <td>\${new Date(s.created_at).toLocaleString()}</td>
+                                        <td><button class="btn-ban" onclick="banUser(\${s.user_id})">Ban</button></td>
+                                    </tr>
+                                \`;
+                            });
+                            html += '</tbody></table></div>';
+                        }
+                        document.getElementById('suspicious').innerHTML = html;
+                    } catch (e) {
+                        console.error('Failed to load suspicious:', e);
+                        document.getElementById('suspicious').innerHTML = '<p style="color:red;">❌ Failed to load suspicious activities: ' + e.message + '</p>';
+                    }
+                }
+
+                async function loadConfig() {
+                    try {
+                        const data = await fetchWithAuth(API_URL + '/config');
+                        if (!data) return;
+                        const configKeys = ['points_per_ad', 'points_per_xno', 'daily_limit', 'min_redeem_points', 'streak_bonus_multiplier', 'referral_bonus'];
+                        let formHtml = '';
+                        configKeys.forEach(key => {
+                            const value = data[key] || '';
+                            const desc = CONFIG_DESCRIPTIONS[key] || '';
+                            formHtml += \`
+                                <div class="config-row">
+                                    <label>\${key.replace(/_/g, ' ').toUpperCase()}</label>
+                                    <input type="number" id="cfg_\${key}" value="\${value}" min="1" step="1">
+                                    <button onclick="updateConfig('\${key}', document.getElementById('cfg_\${key}').value)">Update</button>
+                                    <span class="current-value">Current: \${value}</span>
+                                    <span class="config-description">(\${desc})</span>
+                                </div>
+                            \`;
+                        });
+                        document.getElementById('configForm').innerHTML = formHtml;
+                    } catch (e) {
+                        console.error('Failed to load config:', e);
+                        document.getElementById('configForm').innerHTML = '<p style="color:red;">❌ Failed to load config: ' + e.message + '</p>';
+                    }
+                }
+
+                async function updateConfig(key, value) {
+                    const btn = event.target;
+                    const originalText = btn.textContent;
+                    btn.disabled = true;
+                    btn.textContent = '⏳';
+                    
+                    try {
+                        const res = await fetch(API_URL + '/admin/config', {
+                            method: 'PUT',
+                            headers: { 
+                                'Content-Type': 'application/json',
+                                'Authorization': 'Bearer ' + adminToken
+                            },
+                            body: JSON.stringify({ key, value })
+                        });
+                        const data = await res.json();
+                        if (res.ok) {
+                            alert('✅ Config updated successfully!');
+                            await loadConfig();
+                            await loadStats();
+                        } else {
+                            alert('❌ Error: ' + (data.error || 'Unknown error'));
+                        }
+                    } catch (e) {
+                        alert('❌ Failed to update config: ' + e.message);
+                    } finally {
+                        btn.disabled = false;
+                        btn.textContent = originalText;
+                    }
+                }
+
+                async function banUser(userId) {
+                    if (!confirm('Ban this user?')) return;
+                    try {
+                        const res = await fetch(API_URL + '/admin/ban/' + userId, {
+                            method: 'POST',
+                            headers: { 'Authorization': 'Bearer ' + adminToken }
+                        });
+                        const data = await res.json();
+                        if (res.ok) {
+                            alert('✅ User banned successfully!');
+                            loadSuspicious();
+                            loadStats();
+                        } else {
+                            alert('❌ Error: ' + (data.error || 'Unknown error'));
+                        }
+                    } catch (e) {
+                        alert('❌ Failed to ban user: ' + e.message);
+                    }
+                }
+
+                function logout() {
+                    window.location.href = '/admin/logout';
+                }
+
+                loadStats();
+                loadSuspicious();
+                loadConfig();
+            </script>
+        </body>
+        </html>
+    `);
 });
 
 // ============ HEALTH CHECK ============
@@ -1647,159 +2397,29 @@ app.get('/reset-password/:token', (req, res) => {
     `);
 });
 
-// ============ ADMIN DASHBOARD ============
-app.get('/admin', auth, admin, (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Admin Dashboard</title>
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>
-                * { margin: 0; padding: 0; box-sizing: border-box; }
-                body { font-family: 'Inter', -apple-system, sans-serif; padding: 20px; background: #f4f4f5; }
-                .container { max-width: 1200px; margin: 0 auto; }
-                .card { background: white; padding: 20px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-                table { width: 100%; border-collapse: collapse; }
-                th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #e4e4e7; }
-                th { background: #f8f8fa; font-weight: 600; }
-                .suspicious { background: #fef2f2; }
-                .badge { padding: 4px 8px; border-radius: 9999px; font-size: 12px; display: inline-block; }
-                .badge-danger { background: #fee2e2; color: #dc2626; }
-                .badge-success { background: #dcfce7; color: #16a34a; }
-                .badge-warning { background: #fef3c7; color: #d97706; }
-                .btn-ban { background: #dc2626; color: white; border: none; padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
-                .btn-ban:hover { background: #b91c1c; }
-                .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; }
-                .stat { padding: 16px; background: white; border-radius: 8px; text-align: center; }
-                .stat-value { font-size: 32px; font-weight: 700; }
-                .stat-label { font-size: 14px; color: #6b7280; }
-                h1 { margin-bottom: 20px; }
-                .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-                .btn-logout { background: #6b7280; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; }
-                .btn-logout:hover { background: #4b5563; }
-                @media (max-width: 600px) {
-                    .stats-grid { grid-template-columns: 1fr 1fr; }
-                    table { font-size: 12px; }
-                    th, td { padding: 4px 6px; }
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>🛡️ Admin Dashboard</h1>
-                    <button class="btn-logout" onclick="logout()">Logout</button>
-                </div>
-                <div id="stats" class="card"></div>
-                <div id="suspicious" class="card"></div>
-            </div>
-            <script>
-                const API_URL = '${req.protocol}://${req.get('host')}/api';
-
-                async function fetchWithAuth(url) {
-                    const res = await fetch(url, {
-                        headers: { 'Authorization': 'Bearer ${req.token}' }
-                    });
-                    return res.json();
-                }
-
-                async function loadStats() {
-                    try {
-                        const data = await fetchWithAuth(API_URL + '/admin/stats');
-                        document.getElementById('stats').innerHTML = \`
-                            <div class="stats-grid">
-                                <div class="stat"><div class="stat-value">\${data.users}</div><div class="stat-label">Total Users</div></div>
-                                <div class="stat"><div class="stat-value">\${data.points}</div><div class="stat-label">Total Points</div></div>
-                                <div class="stat"><div class="stat-value">\${data.xno}</div><div class="stat-label">XNO Distributed</div></div>
-                                <div class="stat"><div class="stat-value">\${data.ads}</div><div class="stat-label">Ads Watched</div></div>
-                            </div>
-                        \`;
-                    } catch (e) {
-                        console.error('Failed to load stats:', e);
-                    }
-                }
-
-                async function loadSuspicious() {
-                    try {
-                        const data = await fetchWithAuth(API_URL + '/admin/suspicious');
-                        let html = '<h3>🚨 Suspicious Activities</h3>';
-                        if (data.suspicious.length === 0) {
-                            html += '<p>✅ No suspicious activities found.</p>';
-                        } else {
-                            html += '<div style="overflow-x:auto;"><table><thead><tr><th>User</th><th>Email</th><th>Status</th><th>Time</th><th>Action</th></tr></thead><tbody>';
-                            data.suspicious.forEach(s => {
-                                html += \`
-                                    <tr class="suspicious">
-                                        <td>\${s.username}</td>
-                                        <td>\${s.email}</td>
-                                        <td><span class="badge badge-danger">\${s.status}</span></td>
-                                        <td>\${new Date(s.created_at).toLocaleString()}</td>
-                                        <td><button class="btn-ban" onclick="banUser(\${s.user_id})">Ban</button></td>
-                                    </tr>
-                                \`;
-                            });
-                            html += '</tbody></table></div>';
-                        }
-                        document.getElementById('suspicious').innerHTML = html;
-                    } catch (e) {
-                        console.error('Failed to load suspicious:', e);
-                    }
-                }
-
-                async function banUser(userId) {
-                    if (!confirm('Ban this user?')) return;
-                    try {
-                        const res = await fetch(API_URL + '/admin/ban/' + userId, {
-                            method: 'POST',
-                            headers: { 'Authorization': 'Bearer ${req.token}' }
-                        });
-                        const data = await res.json();
-                        if (res.ok) {
-                            alert('User banned!');
-                            loadSuspicious();
-                            loadStats();
-                        } else {
-                            alert('Error: ' + data.error);
-                        }
-                    } catch (e) {
-                        alert('Failed to ban user');
-                    }
-                }
-
-                async function logout() {
-                    try {
-                        await fetch(API_URL + '/auth/logout', {
-                            method: 'POST',
-                            headers: { 'Authorization': 'Bearer ${req.token}' }
-                        });
-                    } catch (e) {}
-                    window.location.href = '/';
-                }
-
-                loadStats();
-                loadSuspicious();
-            </script>
-        </body>
-        </html>
-    `);
-});
-
 // ============ SERVE FRONTEND STATIC FILES ============
 app.use(express.static(path.join(__dirname, 'frontend')));
 
+// ============ 404 HANDLER ============
 app.get('*', (req, res) => {
+    if (req.path.startsWith('/admin')) {
+        return res.redirect('/admin/login');
+    }
     res.sendFile(path.join(__dirname, 'frontend', 'index.html'));
 });
 
 // ============ GLOBAL ERROR HANDLING MIDDLEWARE ============
 app.use((req, res) => {
     console.log('⚠️ 404 Not Found:', req.method, req.url);
-    res.status(404).json({
-        error: 'Endpoint not found',
-        path: req.url,
-        method: req.method
-    });
+    if (req.path.startsWith('/api')) {
+        res.status(404).json({
+            error: 'Endpoint not found',
+            path: req.url,
+            method: req.method
+        });
+    } else {
+        res.status(404).send('Not Found');
+    }
 });
 
 app.use((err, req, res, next) => {
@@ -1843,6 +2463,7 @@ const server = app.listen(PORT, () => {
     console.log(`\n🚀 XNO Rewards Server running on http://localhost:${PORT}`);
     console.log(`📊 API: http://localhost:${PORT}/api/health`);
     console.log(`🌐 Frontend: http://localhost:${PORT}`);
+    console.log(`👑 Admin email: ${ADMIN_EMAIL}`);
     console.log(`📁 Database: ${process.env.DB_PATH || './database.db'}`);
     console.log(`🔧 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`📋 CORS: All origins allowed\n`);

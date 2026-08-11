@@ -10,7 +10,8 @@ let state = {
     level: 1,
     xp: 0,
     streak: 0,
-    notifications: []
+    notifications: [],
+    config: {} // Sẽ được nạp từ server
 };
 
 // ============ AD STATE ============
@@ -246,16 +247,21 @@ function resetAdState(keepVisible = false) {
     }
     updateAdStatus();
     const btn = document.getElementById('watchBtn');
-    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-play"></i> Watch Ad (+10 pts)'; }
+    if (btn) {
+        const ptsPerAd = state.config.points_per_ad || 10;
+        btn.disabled = false;
+        btn.innerHTML = `<i class="fas fa-play"></i> Watch Ad (+${ptsPerAd} pts)`;
+    }
 }
 
 // ============ UPDATE REDEEM BUTTON ============
 function updateRedeemButton() {
     const btn = document.getElementById('redeemBtn');
     if (!btn) return;
-    if (state.points < 50) {
+    const minPoints = Math.ceil((parseInt(state.config.points_per_xno) || 500) / 10);
+    if (state.points < minPoints) {
         btn.disabled = true;
-        btn.textContent = '🔒 Need 50 pts';
+        btn.textContent = `🔒 Need ${minPoints} pts`;
     } else {
         btn.disabled = false;
         btn.innerHTML = '<i class="fas fa-exchange-alt"></i> Redeem';
@@ -286,7 +292,6 @@ function showNotification(message, type = 'success') {
 // ============ RENDER FUNCTIONS ============
 function render() {
     app = document.getElementById('app');
-    // Nếu có resetToken, hiển thị form reset password
     if (resetToken) {
         app.innerHTML = renderResetPassword();
         attachResetEvents();
@@ -393,7 +398,7 @@ function attachResetEvents() {
     });
 }
 
-// ============ LOGIN PAGE (có banner A-Ads mini) ============
+// ============ LOGIN PAGE ============
 function renderLogin() {
     return `
         <div class="auth-container">
@@ -431,8 +436,6 @@ function renderLogin() {
                     Don't have an account? <a href="#" onclick="state.page='register'; render();">Create one</a>
                     <br><small><a href="#" onclick="forgotPassword()">Forgot password?</a></small>
                 </div>
-
-                <!-- A-ADS Banner mini (hiển thị ở dưới cùng trang login) -->
                 <div class="aads-banner" id="aadsBannerLogin" style="margin-top:24px; position:static; width:100%; max-width:440px; margin-left:auto; margin-right:auto; padding:8px 12px;">
                     <div class="aads-banner-header">
                         <span style="font-size:0.6rem;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.06em;">Sponsored</span>
@@ -506,9 +509,13 @@ function renderRegister() {
 
 // ============ DASHBOARD ============
 function renderDashboard() {
-    const { user, points, stats } = state;
+    const { user, points, stats, config } = state;
+    const pointsPerAd = parseInt(config.points_per_ad) || 10;
+    const pointsPerXNO = parseInt(config.points_per_xno) || 500;
+    const minRedeem = Math.ceil(pointsPerXNO / 10); // 10% của 1 XNO
+
     const progress = Math.min((stats.dailyUsed / stats.dailyLimit * 100), 100);
-    const xnoEarned = (stats.totalEarned / 50 * 0.1).toFixed(4);
+    const xnoEarned = (stats.totalEarned / pointsPerXNO).toFixed(4);
     const { level, xp, nextLevelXp } = calculateLevel(points);
     const levelProgress = Math.min((xp / nextLevelXp) * 100, 100);
 
@@ -616,17 +623,17 @@ function renderDashboard() {
                 <div class="actions-grid">
                     <div class="action-card">
                         <h3>📺 Watch Ad</h3>
-                        <p class="subtitle">Watch a short ad and earn <strong>10 points</strong></p>
+                        <p class="subtitle">Watch a short ad and earn <strong>${pointsPerAd} points</strong></p>
                         <button onclick="watchAd()" id="watchBtn" class="btn-action btn-watch">
-                            <i class="fas fa-play"></i> Watch Ad (+10 pts)
+                            <i class="fas fa-play"></i> Watch Ad (+${pointsPerAd} pts)
                         </button>
                         <div id="adMessage" class="action-message"></div>
                     </div>
                     <div class="action-card">
                         <h3>🔄 Redeem XNO</h3>
-                        <p class="subtitle"><strong>50 points</strong> = <strong>0.1 XNO</strong></p>
+                        <p class="subtitle"><strong>${minRedeem} points</strong> = <strong>${(minRedeem / pointsPerXNO).toFixed(4)} XNO</strong> <br> <small>${pointsPerXNO} points = 1 XNO</small></p>
                         <div class="redeem-input">
-                            <input type="number" id="redeemPoints" min="50" step="50" value="50" placeholder="Points">
+                            <input type="number" id="redeemPoints" min="${minRedeem}" step="${minRedeem}" value="${minRedeem}" placeholder="Points">
                             <input type="text" id="redeemWallet" placeholder="nano_1...">
                             <button onclick="redeem()" id="redeemBtn" class="btn-action btn-redeem">
                                 <i class="fas fa-exchange-alt"></i> Redeem
@@ -636,7 +643,7 @@ function renderDashboard() {
                     </div>
                 </div>
 
-                <!-- Daily Bonus -->
+                <!-- Daily Bonus & Leaderboard -->
                 <div style="margin-bottom:16px;display:flex;gap:12px;flex-wrap:wrap;">
                     <button onclick="claimDailyBonus()" id="dailyBonusBtn" class="btn-action" style="background:var(--gradient-warning);padding:12px 24px;width:auto;border-radius:var(--radius-md);font-weight:700;">
                         🎁 Daily Bonus
@@ -677,7 +684,7 @@ function renderDashboard() {
             </div>
         </div>
 
-        <!-- A-ADS Banner (full, cho chức năng watch ad) -->
+        <!-- A-ADS Banner -->
         <div class="aads-banner" id="aadsBanner">
             <div class="aads-banner-header">
                 <span style="font-size:0.6rem;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.06em;">Sponsored</span>
@@ -896,9 +903,7 @@ async function showLeaderboard() {
     }
 }
 
-// ============ DASHBOARD ACTIONS ============
-
-// ====== WATCH AD ======
+// ============ WATCH AD ============
 async function watchAd() {
     const btn = document.getElementById('watchBtn');
     const msg = document.getElementById('adMessage');
@@ -931,11 +936,12 @@ async function watchAd() {
         msg.textContent = '❌ ' + (error.message || 'Failed to watch ad');
         msg.className = 'action-message error';
         btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-play"></i> Watch Ad (+10 pts)';
+        const ptsPerAd = state.config.points_per_ad || 10;
+        btn.innerHTML = `<i class="fas fa-play"></i> Watch Ad (+${ptsPerAd} pts)`;
     }
 }
 
-// ====== ON AD COMPLETED ======
+// ============ ON AD COMPLETED ============
 async function onAdCompleted() {
     try {
         const sessionId = currentAdSessionId || localStorage.getItem('adSessionId');
@@ -948,8 +954,9 @@ async function onAdCompleted() {
         if (verifyRes.error) throw new Error(verifyRes.error);
         state.points = verifyRes.newTotal;
         await fetchPoints();
-        addLog('🎯 +10 points from ad');
-        showNotification('✅ +10 points earned!', 'success');
+        const ptsPerAd = parseInt(state.config.points_per_ad) || 10;
+        addLog(`🎯 +${ptsPerAd} points from ad`);
+        showNotification(`✅ +${ptsPerAd} points earned!`, 'success');
         updateStats();
         updateRedeemButton();
         resetAdState(true);
@@ -973,22 +980,48 @@ async function onAdCompleted() {
     }
 }
 
-// ====== REDEEM ======
+// ============ REDEEM ============
 async function redeem() {
     const pointsInput = document.getElementById('redeemPoints');
     const walletInput = document.getElementById('redeemWallet');
     const msg = document.getElementById('redeemMessage');
     const btn = document.getElementById('redeemBtn');
-    const points = parseInt(pointsInput.value) || 50;
+    const pointsPerXNO = parseInt(state.config.points_per_xno) || 500;
+    const minRedeem = Math.ceil(pointsPerXNO / 10);
+    const points = parseInt(pointsInput.value) || minRedeem;
+
+    if (state.points < minRedeem) {
+        msg.textContent = `❌ Need at least ${minRedeem} points`;
+        msg.className = 'action-message error';
+        return;
+    }
+    if (points < minRedeem) {
+        msg.textContent = `❌ Minimum ${minRedeem} points`;
+        msg.className = 'action-message error';
+        return;
+    }
+    if (points % minRedeem !== 0) {
+        msg.textContent = `❌ Must be multiple of ${minRedeem}`;
+        msg.className = 'action-message error';
+        return;
+    }
+    if (points > state.points) {
+        msg.textContent = `❌ You have ${state.points} points`;
+        msg.className = 'action-message error';
+        return;
+    }
     const wallet = walletInput.value.trim();
-    if (state.points < 50) { msg.textContent = '❌ Need at least 50 points'; msg.className = 'action-message error'; return; }
-    if (points < 50) { msg.textContent = '❌ Minimum 50 points'; msg.className = 'action-message error'; return; }
-    if (points > state.points) { msg.textContent = `❌ You have ${state.points} points`; msg.className = 'action-message error'; return; }
-    if (!wallet) { msg.textContent = '❌ Enter your Nano wallet'; msg.className = 'action-message error'; return; }
+    if (!wallet) {
+        msg.textContent = '❌ Enter your Nano wallet';
+        msg.className = 'action-message error';
+        return;
+    }
+
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span>';
     msg.textContent = '';
     msg.className = 'action-message';
+
     try {
         const res = await api.post('/redeem', { points, walletAddress: wallet });
         if (res.error) throw new Error(res.error);
@@ -1010,6 +1043,7 @@ async function redeem() {
     }
 }
 
+// ============ FETCH POINTS ============
 async function fetchPoints() {
     try {
         const data = await api.get('/points');
@@ -1024,11 +1058,13 @@ async function fetchPoints() {
     }
 }
 
+// ============ UPDATE STATS ============
 function updateStats() {
+    const pointsPerXNO = parseInt(state.config.points_per_xno) || 500;
     const pointsEl = document.getElementById('pointsDisplay');
     if (pointsEl) pointsEl.textContent = state.points.toLocaleString();
     const xnoEl = document.querySelector('.stat-card.success .stat-value');
-    if (xnoEl) xnoEl.textContent = (state.stats.totalEarned / 50 * 0.1).toFixed(4);
+    if (xnoEl) xnoEl.textContent = (state.stats.totalEarned / pointsPerXNO).toFixed(4);
     const adsEl = document.querySelector('.stat-card.warning .stat-value');
     if (adsEl) adsEl.textContent = state.stats.totalWatched;
     const progressEl = document.querySelector('.stat-card.purple .fill');
@@ -1041,7 +1077,7 @@ function updateStats() {
     const heroPoints = document.querySelector('.hero-stats .stat-item:first-child .value');
     if (heroPoints) heroPoints.textContent = state.points;
     const heroXno = document.querySelector('.hero-stats .stat-item:nth-child(2) .value');
-    if (heroXno) heroXno.textContent = (state.stats.totalEarned / 50 * 0.1).toFixed(4);
+    if (heroXno) heroXno.textContent = (state.stats.totalEarned / pointsPerXNO).toFixed(4);
     const heroAds = document.querySelector('.hero-stats .stat-item:nth-child(3) .value');
     if (heroAds) heroAds.textContent = state.stats.totalWatched;
     const { level, xp, nextLevelXp } = calculateLevel(state.points);
@@ -1053,6 +1089,7 @@ function updateStats() {
     if (levelText) levelText.textContent = `Level ${level} (${xp}/${nextLevelXp} XP)`;
 }
 
+// ============ LOG ============
 function addLog(msg) {
     const log = document.getElementById('log');
     if (log) {
@@ -1082,22 +1119,27 @@ function showError(msg) {
     if (el) { el.textContent = msg; el.className = 'auth-error show'; }
 }
 
+// ============ LOAD CONFIG ============
+async function loadConfig() {
+    try {
+        const res = await fetch(`${API_URL}/config`);
+        const data = await res.json();
+        state.config = data;
+        HCAPTCHA_SITE_KEY = data.hcaptchaSiteKey || HCAPTCHA_SITE_KEY;
+        return data;
+    } catch (error) {
+        console.warn('Failed to load config, using defaults:', error);
+        state.config = { points_per_ad: '10', points_per_xno: '500' };
+        return state.config;
+    }
+}
+
 // ============ BOOT ============
 async function init() {
     loadTheme();
+    await loadConfig();
 
-    // Lấy cấu hình từ server (hCaptcha site key)
-    try {
-        const configRes = await fetch(`${API_URL}/config`);
-        const config = await configRes.json();
-        if (config.hcaptchaSiteKey) {
-            HCAPTCHA_SITE_KEY = config.hcaptchaSiteKey;
-        }
-    } catch (error) {
-        console.warn('Failed to load config, using fallback hCaptcha key:', error);
-    }
-
-    // Kiểm tra đường dẫn reset password
+    // Check reset password token
     const path = window.location.pathname;
     const match = path.match(/^\/reset-password\/([a-f0-9]{64})$/);
     if (match) {
