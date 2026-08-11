@@ -16,8 +16,6 @@ require('dotenv').config();
 // ============ CONFIG ============
 const app = express();
 const PORT = process.env.PORT || 5000;
-
-// ============ ADMIN CONFIG FROM ENV ============
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@example.com';
 
 // ============ GLOBAL ERROR HANDLERS ============
@@ -189,9 +187,7 @@ try {
 try {
     db.exec('ALTER TABLE point_transactions ADD COLUMN reference_id TEXT');
     console.log('✅ Added reference_id column to point_transactions');
-} catch (e) {
-    // already exists
-}
+} catch (e) { /* already exists */ }
 
 try {
     db.exec('ALTER TABLE ad_watch_history ADD COLUMN expires_at DATETIME');
@@ -483,7 +479,6 @@ const verifyHCaptcha = async (token) => {
 // ============ MIDDLEWARE ============
 app.set('trust proxy', true);
 
-// Giới hạn độ dài URL để tránh lỗi 414
 app.use((req, res, next) => {
     if (req.url.length > 2048) {
         return res.status(414).json({ error: 'URI too long' });
@@ -507,7 +502,6 @@ app.use(compression());
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
-// Thêm header chống cache cho tất cả API
 app.use('/api', (req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.set('Pragma', 'no-cache');
@@ -642,7 +636,6 @@ app.put('/api/admin/config', auth, admin, (req, res) => {
         }
         if (setConfigValue(key, numericValue)) {
             const newConfig = getAllConfig();
-            // Xóa cache để lần request tiếp theo lấy mới
             configCache = null;
             configCacheTime = 0;
             broadcastConfigUpdate(newConfig);
@@ -714,7 +707,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
 
 app.post('/api/auth/register', async (req, res) => {
     try {
-        const { username, email, password, walletAddress, hcaptchaToken, otpCode } = req.body;
+        const { username, email, password, walletAddress, hcaptchaToken, otpCode, refCode } = req.body;
 
         if (!username || username.length < 3) {
             return res.status(400).json({ error: 'Username must be at least 3 characters' });
@@ -760,11 +753,33 @@ app.post('/api/auth/register', async (req, res) => {
             console.log(`👑 Admin account registration: ${email}`);
         }
 
+        // Xử lý referral
+        let referredBy = null;
+        if (refCode) {
+            const referrer = db.prepare('SELECT id FROM users WHERE username = ?').get(refCode);
+            if (referrer) {
+                referredBy = referrer.id;
+                // Thưởng cho người giới thiệu
+                const referralBonus = parseInt(getConfigValue('referral_bonus')) || 5;
+                db.prepare('UPDATE users SET points = points + ? WHERE id = ?')
+                    .run(referralBonus, referrer.id);
+                db.prepare(`
+                    INSERT INTO point_transactions (user_id, amount, type, source)
+                    VALUES (?, ?, 'referral_bonus', ?)
+                `).run(referrer.id, referralBonus, `ref_${username}`);
+                // Gửi thông báo
+                db.prepare(`
+                    INSERT INTO notifications (user_id, title, message, type)
+                    VALUES (?, '🎉 Referral Bonus!', 'You earned ${referralBonus} points for referring ${username}', 'success')
+                `).run(referrer.id);
+            }
+        }
+
         const stmt = db.prepare(`
-            INSERT INTO users (username, email, password_hash, wallet_address, is_verified, role)
-            VALUES (?, ?, ?, ?, 1, ?)
+            INSERT INTO users (username, email, password_hash, wallet_address, is_verified, role, referred_by)
+            VALUES (?, ?, ?, ?, 1, ?, ?)
         `);
-        const info = stmt.run(username, email, passwordHash, walletAddress || null, role);
+        const info = stmt.run(username, email, passwordHash, walletAddress || null, role, referredBy);
 
         db.prepare('DELETE FROM email_verifications WHERE email = ?').run(email);
 
@@ -1184,7 +1199,7 @@ app.post('/api/ad/verify', auth, (req, res) => {
     }
 });
 
-// -------- REDEEM (linh hoạt) --------
+// -------- REDEEM --------
 app.post('/api/redeem', auth, async (req, res) => {
     try {
         const { points, walletAddress } = req.body;
@@ -1251,7 +1266,7 @@ app.post('/api/redeem', auth, async (req, res) => {
     }
 });
 
-// -------- USER PROFILE --------
+// -------- USER PROFILE (PUT) --------
 app.get('/api/user/profile', auth, (req, res) => {
     try {
         const user = db.prepare(`
@@ -1285,7 +1300,7 @@ app.put('/api/user/profile', auth, (req, res) => {
             params.push(username);
         }
         
-        if (walletAddress) {
+        if (walletAddress !== undefined) {
             updates.push('wallet_address = ?');
             params.push(walletAddress);
         }
@@ -1525,12 +1540,53 @@ app.get('/api/notifications', auth, (req, res) => {
             LIMIT ?
         `).all(req.user.id, limit);
         
-        db.prepare('UPDATE notifications SET is_read = 1 WHERE user_id = ? AND is_read = 0').run(req.user.id);
-        
+        // Không tự động đánh dấu đã đọc, để client tự xử lý
         res.json({ notifications });
     } catch (error) {
         console.error('❌ Notifications error:', error.message);
         res.status(500).json({ error: 'Failed to get notifications' });
+    }
+});
+
+app.put('/api/notifications/:id/read', auth, (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = db.prepare(`
+            UPDATE notifications SET is_read = 1 
+            WHERE id = ? AND user_id = ?
+        `).run(id, req.user.id);
+        if (result.changes === 0) {
+            return res.status(404).json({ error: 'Notification not found' });
+        }
+        res.json({ success: true });
+    } catch (error) {
+        console.error('❌ Mark read error:', error.message);
+        res.status(500).json({ error: 'Failed to mark as read' });
+    }
+});
+
+app.put('/api/notifications/read-all', auth, (req, res) => {
+    try {
+        db.prepare('UPDATE notifications SET is_read = 1 WHERE user_id = ?').run(req.user.id);
+        res.json({ success: true });
+    } catch (error) {
+        console.error('❌ Mark all read error:', error.message);
+        res.status(500).json({ error: 'Failed to mark all as read' });
+    }
+});
+
+app.delete('/api/notifications/:id', auth, (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = db.prepare('DELETE FROM notifications WHERE id = ? AND user_id = ?')
+            .run(id, req.user.id);
+        if (result.changes === 0) {
+            return res.status(404).json({ error: 'Notification not found' });
+        }
+        res.json({ success: true });
+    } catch (error) {
+        console.error('❌ Delete notification error:', error.message);
+        res.status(500).json({ error: 'Failed to delete notification' });
     }
 });
 
@@ -1611,6 +1667,25 @@ app.get('/api/admin/users', auth, admin, (req, res) => {
     }
 });
 
+app.get('/api/admin/transactions', auth, admin, (req, res) => {
+    try {
+        const limit = parseInt(req.query.limit) || 100;
+        const offset = parseInt(req.query.offset) || 0;
+        const txs = db.prepare(`
+            SELECT pt.id, u.username, pt.amount, pt.type, pt.source, pt.created_at
+            FROM point_transactions pt
+            JOIN users u ON pt.user_id = u.id
+            ORDER BY pt.created_at DESC
+            LIMIT ? OFFSET ?
+        `).all(limit, offset);
+        const total = db.prepare('SELECT COUNT(*) as total FROM point_transactions').get();
+        res.json({ transactions: txs, total: total.total });
+    } catch (error) {
+        console.error('❌ Admin transactions error:', error.message);
+        res.status(500).json({ error: 'Failed to get transactions' });
+    }
+});
+
 app.get('/api/admin/suspicious', auth, admin, (req, res) => {
     try {
         const suspicious = db.prepare(`
@@ -1656,7 +1731,6 @@ app.post('/api/admin/ban/:userId', auth, admin, (req, res) => {
 });
 
 // ============ ADMIN WEB ROUTES ============
-
 app.get('/admin/login', (req, res) => {
     const token = req.cookies?.adminToken;
     if (token) {
@@ -2048,6 +2122,29 @@ app.get('/admin', adminAuthWeb, (req, res) => {
                     color: #6b7280;
                     margin-left: 12px;
                 }
+                .tabs {
+                    display: flex;
+                    gap: 8px;
+                    margin-bottom: 16px;
+                }
+                .tab {
+                    padding: 8px 16px;
+                    background: #e4e4e7;
+                    border-radius: 6px;
+                    cursor: pointer;
+                    font-weight: 600;
+                    border: none;
+                }
+                .tab.active {
+                    background: #0A84FF;
+                    color: white;
+                }
+                .tab-content {
+                    display: none;
+                }
+                .tab-content.active {
+                    display: block;
+                }
                 @media (max-width: 600px) {
                     .stats-grid { grid-template-columns: 1fr 1fr; }
                     table { font-size: 12px; }
@@ -2071,10 +2168,17 @@ app.get('/admin', adminAuthWeb, (req, res) => {
                     <button class="btn-logout" onclick="logout()">Logout</button>
                 </div>
                 <div id="stats" class="card"></div>
-                <div id="suspicious" class="card"></div>
-                <div id="config" class="card">
-                    <h3>⚙️ System Config</h3>
-                    <div id="configForm" class="config-section"></div>
+                <div class="card">
+                    <div class="tabs">
+                        <button class="tab active" data-tab="suspicious">🚨 Suspicious</button>
+                        <button class="tab" data-tab="users">👥 Users</button>
+                        <button class="tab" data-tab="transactions">📜 Transactions</button>
+                        <button class="tab" data-tab="config">⚙️ Config</button>
+                    </div>
+                    <div id="tab-suspicious" class="tab-content active"></div>
+                    <div id="tab-users" class="tab-content"></div>
+                    <div id="tab-transactions" class="tab-content"></div>
+                    <div id="tab-config" class="tab-content"></div>
                 </div>
             </div>
             <script>
@@ -2146,10 +2250,61 @@ app.get('/admin', adminAuthWeb, (req, res) => {
                             });
                             html += '</tbody></table></div>';
                         }
-                        document.getElementById('suspicious').innerHTML = html;
+                        document.getElementById('tab-suspicious').innerHTML = html;
                     } catch (e) {
                         console.error('Failed to load suspicious:', e);
-                        document.getElementById('suspicious').innerHTML = '<p style="color:red;">❌ Failed to load suspicious activities: ' + e.message + '</p>';
+                        document.getElementById('tab-suspicious').innerHTML = '<p style="color:red;">❌ Failed to load suspicious activities: ' + e.message + '</p>';
+                    }
+                }
+
+                async function loadUsers() {
+                    try {
+                        const data = await fetchWithAuth(API_URL + '/admin/users');
+                        if (!data) return;
+                        let html = '<h3>👥 Users</h3><div style="overflow-x:auto;"><table><thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Points</th><th>Role</th><th>Verified</th><th>Created</th></tr></thead><tbody>';
+                        data.forEach(u => {
+                            html += \`
+                                <tr>
+                                    <td>\${u.id}</td>
+                                    <td>\${u.username}</td>
+                                    <td>\${u.email}</td>
+                                    <td>\${u.points}</td>
+                                    <td>\${u.role}</td>
+                                    <td>\${u.is_verified ? '✅' : '❌'}</td>
+                                    <td>\${new Date(u.created_at).toLocaleString()}</td>
+                                </tr>
+                            \`;
+                        });
+                        html += '</tbody></table></div>';
+                        document.getElementById('tab-users').innerHTML = html;
+                    } catch (e) {
+                        console.error('Failed to load users:', e);
+                        document.getElementById('tab-users').innerHTML = '<p style="color:red;">❌ Failed to load users: ' + e.message + '</p>';
+                    }
+                }
+
+                async function loadTransactions() {
+                    try {
+                        const data = await fetchWithAuth(API_URL + '/admin/transactions?limit=100');
+                        if (!data) return;
+                        let html = '<h3>📜 Transactions</h3><div style="overflow-x:auto;"><table><thead><tr><th>ID</th><th>User</th><th>Amount</th><th>Type</th><th>Source</th><th>Time</th></tr></thead><tbody>';
+                        data.transactions.forEach(tx => {
+                            html += \`
+                                <tr>
+                                    <td>\${tx.id}</td>
+                                    <td>\${tx.username}</td>
+                                    <td style="color:\${tx.amount > 0 ? 'green' : 'red'}">\${tx.amount > 0 ? '+' : ''}\${tx.amount}</td>
+                                    <td>\${tx.type}</td>
+                                    <td>\${tx.source || '-'}</td>
+                                    <td>\${new Date(tx.created_at).toLocaleString()}</td>
+                                </tr>
+                            \`;
+                        });
+                        html += '</tbody></table></div>';
+                        document.getElementById('tab-transactions').innerHTML = html;
+                    } catch (e) {
+                        console.error('Failed to load transactions:', e);
+                        document.getElementById('tab-transactions').innerHTML = '<p style="color:red;">❌ Failed to load transactions: ' + e.message + '</p>';
                     }
                 }
 
@@ -2172,10 +2327,10 @@ app.get('/admin', adminAuthWeb, (req, res) => {
                                 </div>
                             \`;
                         });
-                        document.getElementById('configForm').innerHTML = formHtml;
+                        document.getElementById('tab-config').innerHTML = '<h3>⚙️ System Config</h3><div class="config-section">' + formHtml + '</div>';
                     } catch (e) {
                         console.error('Failed to load config:', e);
-                        document.getElementById('configForm').innerHTML = '<p style="color:red;">❌ Failed to load config: ' + e.message + '</p>';
+                        document.getElementById('tab-config').innerHTML = '<p style="color:red;">❌ Failed to load config: ' + e.message + '</p>';
                     }
                 }
 
@@ -2197,8 +2352,8 @@ app.get('/admin', adminAuthWeb, (req, res) => {
                         const data = await res.json();
                         if (res.ok) {
                             alert('✅ Config updated successfully!');
-                            await loadConfig();
-                            await loadStats();
+                            loadConfig();
+                            loadStats();
                         } else {
                             alert('❌ Error: ' + (data.error || 'Unknown error'));
                         }
@@ -2222,6 +2377,7 @@ app.get('/admin', adminAuthWeb, (req, res) => {
                             alert('✅ User banned successfully!');
                             loadSuspicious();
                             loadStats();
+                            loadUsers();
                         } else {
                             alert('❌ Error: ' + (data.error || 'Unknown error'));
                         }
@@ -2234,9 +2390,23 @@ app.get('/admin', adminAuthWeb, (req, res) => {
                     window.location.href = '/admin/logout';
                 }
 
+                // Tab switching
+                document.querySelectorAll('.tab').forEach(tab => {
+                    tab.addEventListener('click', function() {
+                        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                        this.classList.add('active');
+                        document.getElementById('tab-' + this.dataset.tab).classList.add('active');
+                        // Load content if not loaded
+                        if (this.dataset.tab === 'users') loadUsers();
+                        if (this.dataset.tab === 'transactions') loadTransactions();
+                        if (this.dataset.tab === 'config') loadConfig();
+                    });
+                });
+
+                // Load initial tabs
                 loadStats();
                 loadSuspicious();
-                loadConfig();
             </script>
         </body>
         </html>
@@ -2458,7 +2628,10 @@ app.get('/reset-password/:token', (req, res) => {
 });
 
 // ============ SERVE FRONTEND STATIC FILES ============
-app.use(express.static(path.join(__dirname, 'frontend')));
+app.use(express.static(path.join(__dirname, 'frontend'), {
+    maxAge: '1d',
+    etag: true
+}));
 
 // ============ 404 HANDLER ============
 app.get('*', (req, res) => {

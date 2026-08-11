@@ -27,12 +27,13 @@ let state = {
     points: 0,
     stats: { totalWatched: 0, totalEarned: 0, dailyLimit: 100, dailyUsed: 0 },
     isLoading: false,
-    page: 'login',
+    page: 'login',           // 'login' | 'register' | 'dashboard' | 'profile' | 'transactions' | 'notifications'
     level: 1,
     xp: 0,
     streak: 0,
     notifications: [],
-    config: {}
+    config: {},
+    refCode: null
 };
 
 // ============ AD STATE ============
@@ -61,7 +62,7 @@ let isConfigListenerActive = false;
 let configLoaded = false;
 let lastAppliedConfigHash = null;
 const CONFIG_TTL = 10 * 60 * 1000; // 10 phút
-let configPromise = null;          // 🛡️ Promise cache
+let configPromise = null;
 
 // ============ API CLIENT ============
 const api = {
@@ -102,6 +103,55 @@ const api = {
                         method: 'POST',
                         headers: { 'Authorization': `Bearer ${newToken}`, 'Content-Type': 'application/json' },
                         body: JSON.stringify(data)
+                    });
+                    return retry.json();
+                }
+                throw new Error('Session expired. Please login again.');
+            }
+            const errorData = await res.json().catch(() => ({}));
+            throw new Error(errorData.error || `HTTP ${res.status}: ${res.statusText}`);
+        }
+        return res.json();
+    },
+    put: async (endpoint, data) => {
+        const token = localStorage.getItem('accessToken');
+        const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+        const res = await fetch(`${API_URL}${endpoint}`, {
+            method: 'PUT',
+            headers,
+            body: JSON.stringify(data)
+        });
+        if (!res.ok) {
+            if (res.status === 401) {
+                const refreshed = await refreshToken();
+                if (refreshed) {
+                    const newToken = localStorage.getItem('accessToken');
+                    const retry = await fetch(`${API_URL}${endpoint}`, {
+                        method: 'PUT',
+                        headers: { 'Authorization': `Bearer ${newToken}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+                    return retry.json();
+                }
+                throw new Error('Session expired. Please login again.');
+            }
+            const errorData = await res.json().catch(() => ({}));
+            throw new Error(errorData.error || `HTTP ${res.status}: ${res.statusText}`);
+        }
+        return res.json();
+    },
+    delete: async (endpoint) => {
+        const token = localStorage.getItem('accessToken');
+        const headers = { 'Authorization': `Bearer ${token}` };
+        const res = await fetch(`${API_URL}${endpoint}`, { method: 'DELETE', headers });
+        if (!res.ok) {
+            if (res.status === 401) {
+                const refreshed = await refreshToken();
+                if (refreshed) {
+                    const newToken = localStorage.getItem('accessToken');
+                    const retry = await fetch(`${API_URL}${endpoint}`, {
+                        method: 'DELETE',
+                        headers: { 'Authorization': `Bearer ${newToken}` }
                     });
                     return retry.json();
                 }
@@ -161,10 +211,7 @@ function renderCaptcha(containerId) {
     }
 }
 
-// Các callback này chỉ để ngăn hCaptcha tự động submit form
-window.onCaptchaSuccess = function(token) {
-    // Không làm gì, chỉ lưu token (sẽ lấy bằng getCaptchaResponse khi submit)
-};
+window.onCaptchaSuccess = function(token) {};
 window.onCaptchaExpired = function() {
     resetCaptcha();
 };
@@ -355,11 +402,18 @@ function render() {
         attachEvents();
         return;
     }
-    app.innerHTML = renderDashboard();
+    switch (state.page) {
+        case 'profile': app.innerHTML = renderProfile(); break;
+        case 'transactions': app.innerHTML = renderTransactions(); break;
+        case 'notifications': app.innerHTML = renderNotifications(); break;
+        default: app.innerHTML = renderDashboard();
+    }
     attachEvents();
     updateRedeemButton();
     updateWatchButton();
     updateUIFromConfig();
+    // Cập nhật số thông báo chưa đọc
+    updateNotificationBadge();
 }
 
 // ============ RESET PASSWORD ============
@@ -504,6 +558,7 @@ function renderLogin() {
 
 // ============ REGISTER ============
 function renderRegister() {
+    const refCode = state.refCode || '';
     return `
         <div class="auth-container">
             <div class="auth-card">
@@ -523,6 +578,7 @@ function renderRegister() {
                 </div>
                 <div id="error" class="auth-error"></div>
                 <form id="registerForm" class="auth-form" method="POST" onsubmit="return false;">
+                    <input type="hidden" id="refCode" value="${refCode}">
                     <div class="form-group">
                         <label>Username</label>
                         <input type="text" id="username" placeholder="Choose a username" required>
@@ -578,7 +634,7 @@ function renderDashboard() {
     return `
         <div class="dashboard">
             <nav class="navbar">
-                <a href="#" class="navbar-brand" onclick="renderDashboard(); return false;">
+                <a href="#" class="navbar-brand" onclick="state.page='dashboard'; render(); return false;">
                     <svg class="brand-icon" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg" style="height:32px;width:auto;">
                         <rect width="200" height="200" rx="40" fill="url(#brandGrad)" />
                         <text x="100" y="140" font-family="Inter, sans-serif" font-size="100" font-weight="800" fill="white" text-anchor="middle">Ӿ</text>
@@ -591,6 +647,15 @@ function renderDashboard() {
                     </svg>
                     XNO<span>Rewards</span>
                 </a>
+                <div class="navbar-nav">
+                    <a href="#" class="nav-link ${state.page === 'dashboard' ? 'active' : ''}" data-page="dashboard">📊 Dashboard</a>
+                    <a href="#" class="nav-link ${state.page === 'profile' ? 'active' : ''}" data-page="profile">👤 Profile</a>
+                    <a href="#" class="nav-link ${state.page === 'transactions' ? 'active' : ''}" data-page="transactions">📜 Transactions</a>
+                    <a href="#" class="nav-link ${state.page === 'notifications' ? 'active' : ''}" data-page="notifications">
+                        🔔 Notifications
+                        <span class="badge" id="notifBadge">0</span>
+                    </a>
+                </div>
                 <div class="navbar-actions">
                     <span class="user-info">
                         <span class="avatar">${user.username.charAt(0).toUpperCase()}</span>
@@ -758,6 +823,181 @@ function renderDashboard() {
     `;
 }
 
+// ============ PROFILE ============
+function renderProfile() {
+    const { user } = state;
+    return `
+        <div class="dashboard">
+            <nav class="navbar">
+                <a href="#" class="navbar-brand" onclick="state.page='dashboard'; render(); return false;">
+                    <svg class="brand-icon" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg" style="height:32px;width:auto;">
+                        <rect width="200" height="200" rx="40" fill="url(#brandGrad)" />
+                        <text x="100" y="140" font-family="Inter, sans-serif" font-size="100" font-weight="800" fill="white" text-anchor="middle">Ӿ</text>
+                        <defs>
+                            <linearGradient id="brandGrad" x1="0" y1="0" x2="200" y2="200">
+                                <stop offset="0%" stop-color="#0A84FF" />
+                                <stop offset="100%" stop-color="#7C3AED" />
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                    XNO<span>Rewards</span>
+                </a>
+                <div class="navbar-nav">
+                    <a href="#" class="nav-link" data-page="dashboard">📊 Dashboard</a>
+                    <a href="#" class="nav-link active" data-page="profile">👤 Profile</a>
+                    <a href="#" class="nav-link" data-page="transactions">📜 Transactions</a>
+                    <a href="#" class="nav-link" data-page="notifications">
+                        🔔 Notifications
+                        <span class="badge" id="notifBadge">0</span>
+                    </a>
+                </div>
+                <div class="navbar-actions">
+                    <span class="user-info">
+                        <span class="avatar">${user.username.charAt(0).toUpperCase()}</span>
+                        <span class="username"><strong>${user.username}</strong></span>
+                    </span>
+                    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+                        <i class="fas fa-moon" id="themeIcon"></i>
+                    </button>
+                    <button class="btn-logout" onclick="logout()" title="Logout">
+                        <i class="fas fa-sign-out-alt"></i>
+                    </button>
+                </div>
+            </nav>
+            <div class="dashboard-content">
+                <div class="profile-card">
+                    <h2>👤 My Profile</h2>
+                    <div class="profile-avatar">${user.username.charAt(0).toUpperCase()}</div>
+                    <form id="profileForm">
+                        <div class="form-group">
+                            <label>Username</label>
+                            <input type="text" id="profileUsername" value="${user.username}" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Email</label>
+                            <input type="email" value="${user.email}" disabled>
+                        </div>
+                        <div class="form-group">
+                            <label>Nano Wallet</label>
+                            <input type="text" id="profileWallet" value="${user.walletAddress || ''}" placeholder="nano_1...">
+                        </div>
+                        <div class="form-group">
+                            <label>Points</label>
+                            <input type="text" value="${state.points}" disabled>
+                        </div>
+                        <button type="submit" class="btn-primary">Save Changes</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+// ============ TRANSACTIONS ============
+function renderTransactions() {
+    const { user } = state;
+    return `
+        <div class="dashboard">
+            <nav class="navbar">
+                <a href="#" class="navbar-brand" onclick="state.page='dashboard'; render(); return false;">
+                    <svg class="brand-icon" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg" style="height:32px;width:auto;">
+                        <rect width="200" height="200" rx="40" fill="url(#brandGrad)" />
+                        <text x="100" y="140" font-family="Inter, sans-serif" font-size="100" font-weight="800" fill="white" text-anchor="middle">Ӿ</text>
+                        <defs>
+                            <linearGradient id="brandGrad" x1="0" y1="0" x2="200" y2="200">
+                                <stop offset="0%" stop-color="#0A84FF" />
+                                <stop offset="100%" stop-color="#7C3AED" />
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                    XNO<span>Rewards</span>
+                </a>
+                <div class="navbar-nav">
+                    <a href="#" class="nav-link" data-page="dashboard">📊 Dashboard</a>
+                    <a href="#" class="nav-link" data-page="profile">👤 Profile</a>
+                    <a href="#" class="nav-link active" data-page="transactions">📜 Transactions</a>
+                    <a href="#" class="nav-link" data-page="notifications">
+                        🔔 Notifications
+                        <span class="badge" id="notifBadge">0</span>
+                    </a>
+                </div>
+                <div class="navbar-actions">
+                    <span class="user-info">
+                        <span class="avatar">${user.username.charAt(0).toUpperCase()}</span>
+                        <span class="username"><strong>${user.username}</strong></span>
+                    </span>
+                    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+                        <i class="fas fa-moon" id="themeIcon"></i>
+                    </button>
+                    <button class="btn-logout" onclick="logout()" title="Logout">
+                        <i class="fas fa-sign-out-alt"></i>
+                    </button>
+                </div>
+            </nav>
+            <div class="dashboard-content">
+                <h2>📜 Transaction History</h2>
+                <div id="txContainer">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+// ============ NOTIFICATIONS ============
+function renderNotifications() {
+    const { user } = state;
+    return `
+        <div class="dashboard">
+            <nav class="navbar">
+                <a href="#" class="navbar-brand" onclick="state.page='dashboard'; render(); return false;">
+                    <svg class="brand-icon" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg" style="height:32px;width:auto;">
+                        <rect width="200" height="200" rx="40" fill="url(#brandGrad)" />
+                        <text x="100" y="140" font-family="Inter, sans-serif" font-size="100" font-weight="800" fill="white" text-anchor="middle">Ӿ</text>
+                        <defs>
+                            <linearGradient id="brandGrad" x1="0" y1="0" x2="200" y2="200">
+                                <stop offset="0%" stop-color="#0A84FF" />
+                                <stop offset="100%" stop-color="#7C3AED" />
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                    XNO<span>Rewards</span>
+                </a>
+                <div class="navbar-nav">
+                    <a href="#" class="nav-link" data-page="dashboard">📊 Dashboard</a>
+                    <a href="#" class="nav-link" data-page="profile">👤 Profile</a>
+                    <a href="#" class="nav-link" data-page="transactions">📜 Transactions</a>
+                    <a href="#" class="nav-link active" data-page="notifications">
+                        🔔 Notifications
+                        <span class="badge" id="notifBadge">0</span>
+                    </a>
+                </div>
+                <div class="navbar-actions">
+                    <span class="user-info">
+                        <span class="avatar">${user.username.charAt(0).toUpperCase()}</span>
+                        <span class="username"><strong>${user.username}</strong></span>
+                    </span>
+                    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+                        <i class="fas fa-moon" id="themeIcon"></i>
+                    </button>
+                    <button class="btn-logout" onclick="logout()" title="Logout">
+                        <i class="fas fa-sign-out-alt"></i>
+                    </button>
+                </div>
+            </nav>
+            <div class="dashboard-content">
+                <div class="notif-header">
+                    <h2>🔔 Notifications</h2>
+                    <button onclick="markAllRead()" class="btn-sm">Mark all read</button>
+                </div>
+                <div id="notifList">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
 // ============ CONFIG ============
 function generateConfigHash(config) {
     const keys = ['points_per_ad', 'points_per_xno', 'min_redeem_points', 'referral_bonus', 'daily_limit', 'streak_bonus_multiplier'];
@@ -803,7 +1043,7 @@ function updateUIFromConfig() {
     showNotification('⚙️ System config updated!', 'info');
 }
 
-// ============ LOAD CONFIG (CHỈ 1 LẦN DUY NHẤT) ============
+// ============ LOAD CONFIG ============
 async function loadConfig(forceRefresh = false) {
     if (forceRefresh) {
         configLoaded = false;
@@ -915,6 +1155,19 @@ function stopConfigListener() {
 function attachEvents() {
     loadTheme();
 
+    // Navigation
+    document.querySelectorAll('.nav-link').forEach(link => {
+        link.addEventListener('click', (e) => {
+            e.preventDefault();
+            const page = link.dataset.page;
+            if (page) {
+                state.page = page;
+                render();
+            }
+        });
+    });
+
+    // Send OTP
     document.getElementById('sendOtpBtn')?.addEventListener('click', debounce(async function() {
         const email = document.getElementById('email').value;
         const statusEl = document.getElementById('otpStatus');
@@ -953,9 +1206,10 @@ function attachEvents() {
         }
     }, 800));
 
+    // Login
     document.getElementById('loginForm')?.addEventListener('submit', debounce(async function(e) {
         e.preventDefault();
-        e.stopPropagation(); // 🛡️ ngăn lan truyền sự kiện
+        e.stopPropagation();
         const token = getCaptchaResponse();
         if (!token || token.length === 0) { showError('Please complete hCaptcha verification'); return; }
         const email = document.getElementById('email').value;
@@ -978,6 +1232,7 @@ function attachEvents() {
             startConfigListener();
             resetCaptcha();
             showNotification('Welcome back! 🎉', 'success');
+            state.page = 'dashboard';
             render();
         } catch (error) {
             showError(error.message);
@@ -988,9 +1243,10 @@ function attachEvents() {
         }
     }, 500));
 
+    // Register
     document.getElementById('registerForm')?.addEventListener('submit', debounce(async function(e) {
         e.preventDefault();
-        e.stopPropagation(); // 🛡️ ngăn lan truyền sự kiện
+        e.stopPropagation();
         const token = getCaptchaResponse();
         if (!token || token.length === 0) { showError('Please complete hCaptcha verification'); return; }
         const username = document.getElementById('username').value;
@@ -998,6 +1254,7 @@ function attachEvents() {
         const password = document.getElementById('password').value;
         const wallet = document.getElementById('wallet').value;
         const otpCode = document.getElementById('otpCode').value;
+        const refCode = document.getElementById('refCode').value;
         const btn = document.getElementById('registerBtn');
         if (!otpCode || otpCode.length !== 4) { showError('Please enter 4-digit verification code'); return; }
         btn.disabled = true;
@@ -1006,7 +1263,7 @@ function attachEvents() {
             const res = await fetch(`${API_URL}/auth/register`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, email, password, walletAddress: wallet, hcaptchaToken: token, otpCode })
+                body: JSON.stringify({ username, email, password, walletAddress: wallet, hcaptchaToken: token, otpCode, refCode })
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || 'Registration failed');
@@ -1023,12 +1280,36 @@ function attachEvents() {
         }
     }, 500));
 
+    // Profile form
+    document.getElementById('profileForm')?.addEventListener('submit', debounce(async function(e) {
+        e.preventDefault();
+        const username = document.getElementById('profileUsername').value;
+        const wallet = document.getElementById('profileWallet').value;
+        try {
+            const res = await api.put('/user/profile', { username, walletAddress: wallet });
+            state.user = res.user;
+            showNotification('✅ Profile updated!', 'success');
+            render();
+        } catch (error) {
+            showNotification('❌ ' + error.message, 'error');
+        }
+    }, 500));
+
+    // Close ad banner
     document.getElementById('aadsBannerClose')?.addEventListener('click', () => {
         resetAdState(false);
         const banner = document.getElementById('aadsBanner');
         if (banner) banner.style.display = 'none';
         updateRedeemButton();
     });
+
+    // Load transactions when page is transactions
+    if (state.page === 'transactions') {
+        loadTransactionsData();
+    }
+    if (state.page === 'notifications') {
+        loadNotificationsData();
+    }
 }
 
 // ============ FORGOT PASSWORD ============
@@ -1322,12 +1603,127 @@ function clearLog() {
     if (log) log.innerHTML = `<div class="log-entry" style="color:var(--text-tertiary);"><span class="time">—</span> Log cleared</div>`;
 }
 
+// ============ NOTIFICATIONS HELPERS ============
+async function loadNotificationsData() {
+    try {
+        const data = await api.get('/notifications?limit=20');
+        state.notifications = data.notifications;
+        const container = document.getElementById('notifList');
+        if (!container) return;
+        if (state.notifications.length === 0) {
+            container.innerHTML = '<p class="empty">No notifications</p>';
+        } else {
+            let html = '';
+            state.notifications.forEach(n => {
+                html += `
+                    <div class="notif-item ${n.is_read ? 'read' : 'unread'}" data-id="${n.id}">
+                        <div class="notif-title">${n.title}</div>
+                        <div class="notif-message">${n.message}</div>
+                        <div class="notif-time">${new Date(n.created_at).toLocaleString()}</div>
+                        ${!n.is_read ? `<button onclick="markRead(${n.id})" class="btn-sm">Mark read</button>` : ''}
+                        <button onclick="deleteNotification(${n.id})" class="btn-sm danger">Delete</button>
+                    </div>
+                `;
+            });
+            container.innerHTML = html;
+        }
+        updateNotificationBadge();
+    } catch (error) {
+        console.error('Failed to load notifications:', error);
+        document.getElementById('notifList').innerHTML = '<p class="error">Failed to load notifications</p>';
+    }
+}
+
+async function loadTransactionsData() {
+    try {
+        const data = await api.get('/transactions?limit=50');
+        const container = document.getElementById('txContainer');
+        if (!container) return;
+        const { points, xno } = data;
+        let html = '<div class="tx-tabs"><button class="tx-tab active" data-tab="points">Points</button><button class="tx-tab" data-tab="xno">XNO</button></div>';
+        html += '<div id="txList" class="tx-list">';
+        if (points.length === 0) {
+            html += '<p class="empty">No point transactions</p>';
+        } else {
+            points.forEach(tx => {
+                const sign = tx.amount > 0 ? '+' : '';
+                const cls = tx.amount > 0 ? 'positive' : 'negative';
+                html += `<div class="tx-entry"><span class="tx-time">${new Date(tx.created_at).toLocaleString()}</span><span class="tx-type">${tx.type}</span><span class="tx-amount ${cls}">${sign}${tx.amount}</span></div>`;
+            });
+        }
+        html += '</div>';
+        // XNO transactions
+        html += '<div id="xnoList" class="tx-list" style="display:none;">';
+        if (xno.length === 0) {
+            html += '<p class="empty">No XNO transactions</p>';
+        } else {
+            xno.forEach(tx => {
+                html += `<div class="tx-entry"><span class="tx-time">${new Date(tx.created_at).toLocaleString()}</span><span class="tx-type">Redeem</span><span class="tx-amount positive">${tx.amount_xno} XNO</span></div>`;
+            });
+        }
+        html += '</div>';
+        container.innerHTML = html;
+        // Tab switching
+        document.querySelectorAll('.tx-tab').forEach(tab => {
+            tab.addEventListener('click', function() {
+                document.querySelectorAll('.tx-tab').forEach(t => t.classList.remove('active'));
+                this.classList.add('active');
+                document.getElementById('txList').style.display = this.dataset.tab === 'points' ? 'block' : 'none';
+                document.getElementById('xnoList').style.display = this.dataset.tab === 'xno' ? 'block' : 'none';
+            });
+        });
+    } catch (error) {
+        console.error('Failed to load transactions:', error);
+        document.getElementById('txContainer').innerHTML = '<p class="error">Failed to load transactions</p>';
+    }
+}
+
+function updateNotificationBadge() {
+    const badge = document.getElementById('notifBadge');
+    if (!badge) return;
+    const unread = state.notifications.filter(n => !n.is_read).length;
+    badge.textContent = unread;
+    badge.style.display = unread > 0 ? 'inline' : 'none';
+}
+
+async function markRead(id) {
+    try {
+        await api.put(`/notifications/${id}/read`);
+        state.notifications = state.notifications.map(n => n.id === id ? {...n, is_read: 1} : n);
+        render();
+    } catch (error) {
+        showNotification('❌ ' + error.message, 'error');
+    }
+}
+
+async function markAllRead() {
+    try {
+        await api.put('/notifications/read-all');
+        state.notifications = state.notifications.map(n => ({...n, is_read: 1}));
+        render();
+    } catch (error) {
+        showNotification('❌ ' + error.message, 'error');
+    }
+}
+
+async function deleteNotification(id) {
+    if (!confirm('Delete this notification?')) return;
+    try {
+        await api.delete(`/notifications/${id}`);
+        state.notifications = state.notifications.filter(n => n.id !== id);
+        render();
+    } catch (error) {
+        showNotification('❌ ' + error.message, 'error');
+    }
+}
+
 function logout() {
     stopConfigListener();
     localStorage.removeItem('accessToken');
     localStorage.removeItem('refreshToken');
     state.user = null;
     showNotification('👋 Logged out', 'info');
+    state.page = 'login';
     render();
 }
 
@@ -1338,9 +1734,20 @@ function showError(msg) {
 
 // ============ BOOT ============
 async function init() {
-    cleanUrlParams(); // 🧹 xoá token khỏi URL ngay khi tải trang
+    cleanUrlParams();
     loadTheme();
-    await loadConfig();   // chỉ gọi một lần duy nhất
+    await loadConfig();
+
+    // Xử lý referral code từ URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const refCode = urlParams.get('ref');
+    if (refCode) {
+        state.refCode = refCode;
+        // Xóa khỏi URL để không lộ
+        const cleanUrl = new URL(window.location);
+        cleanUrl.searchParams.delete('ref');
+        window.history.replaceState({}, document.title, cleanUrl.toString());
+    }
 
     const path = window.location.pathname;
     const match = path.match(/^\/reset-password\/([a-f0-9]{64})$/);
@@ -1361,6 +1768,7 @@ async function init() {
                 const streakRes = await api.get('/streak');
                 if (!streakRes.error) state.streak = streakRes.streak || 0;
                 startConfigListener();
+                state.page = 'dashboard';
             }
         } catch (error) {
             localStorage.removeItem('accessToken');
@@ -1386,6 +1794,9 @@ window.copyReferral = copyReferral;
 window.claimDailyBonus = claimDailyBonus;
 window.showLeaderboard = showLeaderboard;
 window.renderDashboard = renderDashboard;
+window.markRead = markRead;
+window.markAllRead = markAllRead;
+window.deleteNotification = deleteNotification;
 
 document.addEventListener('DOMContentLoaded', init);
 console.log('🚀 XNO Rewards App Loaded - Config fetched only once, debounced events, hCaptcha token never appears in URL');
