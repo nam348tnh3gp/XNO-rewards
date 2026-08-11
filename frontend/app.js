@@ -36,6 +36,11 @@ let app = null;
 let configEventSource = null;
 let isConfigListenerActive = false;
 
+// ============ CONFIG CACHE ============
+let configLoaded = false;
+let lastAppliedConfigHash = null;
+const CONFIG_TTL = 5 * 60 * 1000; // 5 phút
+
 // ============ API CLIENT ============
 const api = {
     get: async (endpoint) => {
@@ -713,8 +718,6 @@ function renderDashboard() {
 }
 
 // ============ UPDATE UI FROM CONFIG ============
-let lastAppliedConfigHash = null;
-
 function generateConfigHash(config) {
     const keys = ['points_per_ad', 'points_per_xno', 'min_redeem_points', 'referral_bonus', 'daily_limit', 'streak_bonus_multiplier'];
     return keys.map(k => `${k}=${config[k] || ''}`).join('|');
@@ -736,7 +739,6 @@ function updateUIFromConfig() {
     const minRedeem = parseInt(state.config.min_redeem_points) || 50;
     const referralBonus = parseInt(state.config.referral_bonus) || 5;
 
-    // Watch button
     const watchBtn = document.getElementById('watchBtn');
     if (watchBtn && !watchBtn.disabled) {
         watchBtn.innerHTML = `<i class="fas fa-play"></i> Watch Ad (+${pointsPerAd} pts)`;
@@ -765,12 +767,72 @@ function updateUIFromConfig() {
 
     updateRedeemButton();
     updateStats();
-    
-    // Hiển thị thông báo cho user biết config đã thay đổi
     showNotification('⚙️ System config updated!', 'info');
 }
 
-// ============ REAL-TIME CONFIG VIA SERVER-SENT EVENTS (SSE) ============
+// ============ LOAD CONFIG (CHỈ 1 LẦN DUY NHẤT) ============
+async function loadConfig() {
+    // Nếu đã load config trong phiên này thì không gọi lại
+    if (configLoaded) {
+        console.log('ℹ️ Config already loaded, using cached');
+        return state.config;
+    }
+
+    // Kiểm tra cache trong localStorage    const cached = localStorage.getItem('xno_config_cache');
+    if (cached) {
+        try {
+            const { data, timestamp } = JSON.parse(cached);
+            if (Date.now() - timestamp < CONFIG_TTL) {
+                state.config = data;
+                HCAPTCHA_SITE_KEY = data.hcaptchaSiteKey || HCAPTCHA_SITE_KEY;
+                lastAppliedConfigHash = generateConfigHash(data);
+                configLoaded = true;
+                console.log('✅ Config loaded from cache (TTL valid)');
+                return data;
+            }
+            console.log('ℹ️ Config cache expired, reloading...');
+        } catch (e) {
+            console.warn('⚠️ Invalid cache, reloading...');
+        }
+    }
+
+    // Gọi API lấy config
+    try {
+        console.log('📡 Fetching config from API...');
+        const res = await fetch(`${API_URL}/config`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        
+        state.config = data;
+        HCAPTCHA_SITE_KEY = data.hcaptchaSiteKey || HCAPTCHA_SITE_KEY;
+        lastAppliedConfigHash = generateConfigHash(data);
+        
+        // Lưu cache
+        localStorage.setItem('xno_config_cache', JSON.stringify({
+            data: data,
+            timestamp: Date.now()
+        }));
+        
+        configLoaded = true;
+        console.log('✅ Config loaded from API');
+        return data;
+    } catch (error) {
+        console.warn('⚠️ Failed to load config, using defaults:', error);
+        state.config = { 
+            points_per_ad: '10', 
+            points_per_xno: '500', 
+            referral_bonus: '5',
+            min_redeem_points: '50',
+            daily_limit: '100',
+            streak_bonus_multiplier: '2'
+        };
+        lastAppliedConfigHash = generateConfigHash(state.config);
+        configLoaded = true;
+        return state.config;
+    }
+}
+
+// ============ REAL-TIME CONFIG VIA SSE ============
 function startConfigListener() {
     if (isConfigListenerActive) {
         console.log('ℹ️ Config listener already active');
@@ -778,7 +840,6 @@ function startConfigListener() {
     }
 
     try {
-        // Sử dụng EventSource để lắng nghe sự kiện từ server
         configEventSource = new EventSource(`${API_URL}/config/stream`);
         
         configEventSource.onopen = () => {
@@ -791,11 +852,16 @@ function startConfigListener() {
                 const data = JSON.parse(event.data);
                 console.log('📡 Config update received from server:', data);
                 
-                // Cập nhật config mới
                 state.config = data.config || data;
                 HCAPTCHA_SITE_KEY = data.hcaptchaSiteKey || HCAPTCHA_SITE_KEY;
                 
-                // Update UI
+                // Cập nhật cache
+                localStorage.setItem('xno_config_cache', JSON.stringify({
+                    data: state.config,
+                    timestamp: Date.now()
+                }));
+                
+                lastAppliedConfigHash = generateConfigHash(state.config);
                 updateUIFromConfig();
             } catch (err) {
                 console.error('❌ Error processing config update:', err);
@@ -804,13 +870,11 @@ function startConfigListener() {
 
         configEventSource.onerror = (error) => {
             console.warn('⚠️ SSE error, will reconnect...', error);
-            // EventSource tự động reconnect, chỉ cần log
         };
 
         console.log('📡 Config listener started (SSE)');
     } catch (error) {
         console.warn('⚠️ SSE not supported, falling back to single load only:', error);
-        // Fallback: chỉ load 1 lần, không poll
     }
 }
 
@@ -820,31 +884,6 @@ function stopConfigListener() {
         configEventSource = null;
         isConfigListenerActive = false;
         console.log('🔌 Config listener stopped');
-    }
-}
-
-// ============ LOAD CONFIG (CHỈ 1 LẦN KHI KHỞI TẠO) ============
-async function loadConfig() {
-    try {
-        const res = await fetch(`${API_URL}/config`);
-        const data = await res.json();
-        state.config = data;
-        HCAPTCHA_SITE_KEY = data.hcaptchaSiteKey || HCAPTCHA_SITE_KEY;
-        lastAppliedConfigHash = generateConfigHash(data);
-        console.log('✅ Config loaded once:', data);
-        return data;
-    } catch (error) {
-        console.warn('Failed to load config, using defaults:', error);
-        state.config = { 
-            points_per_ad: '10', 
-            points_per_xno: '500', 
-            referral_bonus: '5',
-            min_redeem_points: '50',
-            daily_limit: '100',
-            streak_bonus_multiplier: '2'
-        };
-        lastAppliedConfigHash = generateConfigHash(state.config);
-        return state.config;
     }
 }
 
@@ -911,7 +950,6 @@ function attachEvents() {
             localStorage.setItem('refreshToken', data.refreshToken);
             state.user = data.user;
             await fetchPoints();
-            // Start real-time config listener (SSE)
             startConfigListener();
             resetCaptcha();
             showNotification('Welcome back! 🎉', 'success');
@@ -1295,7 +1333,6 @@ async function init() {
                 await fetchPoints();
                 const streakRes = await api.get('/streak');
                 if (!streakRes.error) state.streak = streakRes.streak || 0;
-                // Start real-time config listener (SSE)
                 startConfigListener();
             }
         } catch (error) {

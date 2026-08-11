@@ -292,6 +292,21 @@ function getAllConfig() {
     }
 }
 
+// ============ SSE CLIENTS & BROADCAST ============
+const sseClients = [];
+
+function broadcastConfigUpdate(config) {
+    const data = JSON.stringify({ event: 'config-updated', config });
+    sseClients.forEach((res, index) => {
+        try {
+            res.write(`data: ${data}\n\n`);
+        } catch (err) {
+            // Xoá client lỗi
+            sseClients.splice(index, 1);
+        }
+    });
+}
+
 // ============ HELPERS ============
 const hashPassword = (password) => {
     try {
@@ -569,6 +584,25 @@ app.get('/api/config', (req, res) => {
     });
 });
 
+// ============ SSE STREAM ============
+app.get('/api/config/stream', (req, res) => {
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+    });
+    // Gửi config hiện tại ngay khi kết nối
+    const config = getAllConfig();
+    res.write(`data: ${JSON.stringify({ event: 'config-updated', config })}\n\n`);
+
+    sseClients.push(res);
+
+    req.on('close', () => {
+        const index = sseClients.indexOf(res);
+        if (index > -1) sseClients.splice(index, 1);
+    });
+});
+
 app.put('/api/admin/config', auth, admin, (req, res) => {
     try {
         const { key, value } = req.body;
@@ -585,6 +619,8 @@ app.put('/api/admin/config', auth, admin, (req, res) => {
         }
         if (setConfigValue(key, numericValue)) {
             const newConfig = getAllConfig();
+            // Broadcast cho tất cả client SSE
+            broadcastConfigUpdate(newConfig);
             res.json({ 
                 success: true, 
                 message: `Config ${key} updated to ${numericValue}`,
@@ -1520,7 +1556,6 @@ app.get('/api/admin/stats', auth, admin, (req, res) => {
     try {
         const totalUsers = db.prepare('SELECT COUNT(*) as count FROM users').get();
         const totalPoints = db.prepare('SELECT SUM(points) as total FROM users').get();
-        // FIX: Dùng dấu nháy đơn cho chuỗi 'completed'
         const totalXNO = db.prepare('SELECT SUM(amount_xno) as total FROM xno_transactions WHERE status = ?').get('completed');
         const totalAds = db.prepare('SELECT COUNT(*) as count FROM point_transactions WHERE type = ?').get('watch_ad');
         const totalRedeemed = db.prepare('SELECT SUM(-amount) as total FROM point_transactions WHERE type = ?').get('redeem');
